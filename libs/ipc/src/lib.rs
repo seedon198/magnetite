@@ -5,6 +5,10 @@
 //! Synchronous IPC over Endpoints, as pure logic
 //! ([ADR 0018](../../docs/adr/0018-synchronous-ipc.md)).
 
+mod engine;
+
+pub use engine::{CapAccess, Effect, Ipc, Outcome, MAX_THREADS};
+
 use capability::object::EndpointState;
 use capability::{MessageInfo, MSG_REGISTERS};
 use sched::ThreadId;
@@ -132,6 +136,171 @@ fn decode(w: u64) -> Option<ThreadId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use capability::{CapError, CapId, Capability, Rights};
+
+    /// For tests that move no capabilities: any capability access is a bug.
+    struct NoCaps;
+    impl CapAccess for NoCaps {
+        type Obj = u32;
+        fn get(&mut self, _: ThreadId, _: CapId) -> Result<Capability<u32>, CapError> {
+            unreachable!("no capability access expected")
+        }
+        fn is_empty(&mut self, _: ThreadId, _: CapId) -> bool {
+            unreachable!("no capability access expected")
+        }
+        fn insert_at(&mut self, _: ThreadId, _: CapId, _: Capability<u32>) -> Result<(), CapError> {
+            unreachable!("no capability access expected")
+        }
+    }
+
+    const T1: ThreadId = ThreadId(1);
+    const T2: ThreadId = ThreadId(2);
+    const T3: ThreadId = ThreadId(3);
+    const T4: ThreadId = ThreadId(4);
+
+    fn msg(label: u32, len: u8, mr: [u64; MSG_REGISTERS]) -> Message {
+        Message {
+            info: MessageInfo::new(label, len, 0),
+            mr,
+        }
+    }
+
+    fn woken(o: &Outcome) -> [Option<ThreadId>; 4] {
+        let mut w = [None; 4];
+        for (i, t) in o.woken().enumerate() {
+            w[i] = Some(t);
+        }
+        w
+    }
+
+    #[test]
+    fn recv_then_send_delivers_message_and_badge() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        let o = ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        assert_eq!(o.caller, Effect::Block);
+        let o = ipc.send(
+            &mut NoCaps,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            7,
+            msg(42, 2, [1, 2, 99, 99]),
+            None,
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T1), None, None, None]);
+        let r = ipc.take_result(T1).unwrap().unwrap().unwrap();
+        assert_eq!((r.info.label(), r.info.length(), r.info.caps()), (42, 2, 0));
+        assert_eq!(r.mr, [1, 2, 0, 0], "registers past length must not leak");
+        assert_eq!(r.badge, 7);
+        assert_eq!(ipc.take_result(T2), Some(Ok(None)));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn send_then_recv_delivers() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        let o = ipc.send(
+            &mut NoCaps,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(5, 1, [9, 0, 0, 0]),
+            None,
+        );
+        assert_eq!(o.caller, Effect::Block);
+        assert_eq!(ep.kind, QueueKind::Senders);
+        let o = ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        let r = ipc.take_result(T1).unwrap().unwrap().unwrap();
+        assert_eq!((r.info.label(), r.mr[0], r.badge), (5, 9, 0));
+        assert_eq!(ipc.take_result(T2), Some(Ok(None)));
+        assert_eq!(ep.kind, QueueKind::Empty);
+    }
+
+    #[test]
+    fn queued_senders_are_served_fifo() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        for (t, label) in [(T1, 1), (T2, 2), (T3, 3)] {
+            let o = ipc.send(
+                &mut NoCaps,
+                &mut ep,
+                t,
+                Rights::SEND,
+                0,
+                msg(label, 0, [0; 4]),
+                None,
+            );
+            assert_eq!(o.caller, Effect::Block);
+        }
+        for want in 1..=3 {
+            let o = ipc.recv(&mut NoCaps, &mut ep, T4, Rights::RECV, None);
+            assert_eq!(o.caller, Effect::Done);
+            let r = ipc.take_result(T4).unwrap().unwrap().unwrap();
+            assert_eq!(r.info.label(), want);
+        }
+        assert_eq!(ep.kind, QueueKind::Empty);
+    }
+
+    #[test]
+    fn send_without_send_right_fails() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        let o = ipc.send(
+            &mut NoCaps,
+            &mut ep,
+            T1,
+            Rights::RECV,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::MissingRight)));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn recv_without_recv_right_fails() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        let o = ipc.recv(&mut NoCaps, &mut ep, T1, Rights::SEND, None);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::MissingRight)));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn queue_never_mixes_kinds() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        ipc.recv(&mut NoCaps, &mut ep, T2, Rights::RECV, None);
+        assert_eq!(ep.kind, QueueKind::Receivers);
+        ipc.send(
+            &mut NoCaps,
+            &mut ep,
+            T3,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+        );
+        assert_eq!(
+            (ep.kind, ep.head, ep.tail),
+            (QueueKind::Receivers, Some(T2), Some(T2))
+        );
+        ipc.send(
+            &mut NoCaps,
+            &mut ep,
+            T4,
+            Rights::SEND,
+            0,
+            msg(2, 0, [0; 4]),
+            None,
+        );
+        assert_eq!(ep, EndpointQueue::new());
+    }
 
     #[test]
     fn endpoint_queue_roundtrips_through_state() {
