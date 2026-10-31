@@ -16,6 +16,10 @@ As throughout the kernel, the pure algebra lives in a `#![forbid(unsafe_code)]`,
 host-tested crate (`capability`), and the parts that touch physical memory live
 in `hal`.
 
+<p align="center">
+  <img src="../assets/capabilities.svg" alt="Capability model: a task's capability space points at kernel objects retyped from Untyped memory; derived capabilities have fewer rights; every action is a rights-checked invoke" width="820">
+</p>
+
 ## Rights and capabilities
 
 `Rights` is a set of bit flags (`READ`, `WRITE`, `EXECUTE`, `MAP`, `SEND`,

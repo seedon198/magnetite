@@ -11,6 +11,10 @@ in ordinary **user** address spaces, not in the kernel half.
 
 ## Virtual address map (kernel view)
 
+<p align="center">
+  <img src="../assets/memory-layout.svg" alt="Virtual address space: kernel image with W^X sections in the KASLR window, kernel heap, LAPIC page, HHDM, non-canonical hole, user space, unmapped NULL page" width="820">
+</p>
+
 | Start | End | Size | Contents |
 |---|---|---|---|
 | `0x0000000000000000` | `0x0000000000000fff` | 4 KiB | Unmapped - catches NULL dereferences |

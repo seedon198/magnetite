@@ -86,6 +86,44 @@ What works on `main` today, verified on every boot in QEMU:
 Every decision is recorded as an [ADR](docs/adr/) with the alternatives
 considered, and is made **with the maintainer**, not unilaterally.
 
+## Security model: capabilities
+
+Every resource is reached through a capability: an unforgeable handle to a kernel
+object plus the rights over it. A task can do exactly what its capabilities allow
+and nothing else. Objects are carved out of Untyped memory the task already
+holds, so the kernel never allocates on a task's behalf. Deriving a capability
+can only remove rights, never add them.
+
+<p align="center">
+  <img src="docs/assets/capabilities.svg" alt="Capability model: a task's capability space points at kernel objects; objects are retyped out of Untyped memory; a derived capability has fewer rights; every action is a rights-checked invoke" width="820">
+</p>
+
+More: [Capabilities](docs/architecture/capabilities.md) · [Security model](docs/architecture/security-model.md) · [ADR 0016](docs/adr/0016-capability-implementation.md)
+
+## How it boots
+
+Limine loads the kernel at a randomized address, `_start` copies the boot
+information into a bootloader-neutral struct, and `kmain` brings the system up
+step by step, verifying each protection as it goes.
+
+<p align="center">
+  <img src="docs/assets/boot-sequence.svg" alt="Boot sequence: firmware, Limine, _start, then kmain's numbered steps, then the planned root server" width="820">
+</p>
+
+More: [Boot process](docs/architecture/boot.md) · [Interrupts and preemption](docs/architecture/interrupts.md)
+
+## Memory layout
+
+The kernel half of every address space is identical; user space is private to
+each task. No page is ever both writable and executable, and the kernel image
+lands at a new random base on every boot.
+
+<p align="center">
+  <img src="docs/assets/memory-layout.svg" alt="Virtual address space: kernel image with W^X sections in the KASLR window, kernel heap, LAPIC page, HHDM, the non-canonical hole, user space, and the unmapped NULL page" width="820">
+</p>
+
+More: [Memory layout](docs/architecture/memory-layout.md) · [Memory management](docs/architecture/memory-management.md)
+
 ## Quick start
 
 Development works on **macOS (Apple Silicon and Intel)**, **Linux** and
@@ -99,6 +137,10 @@ brew install qemu xorriso
 git clone https://github.com/seedon198/magnetite.git && cd magnetite
 cargo xtask run        # build the ISO and boot it in QEMU (serial on your terminal)
 ```
+
+<p align="center">
+  <img src="docs/assets/dev-toolchain.svg" alt="Toolchain: cargo build makes the kernel ELF, cargo xtask iso makes kernel.iso, cargo xtask run boots it in QEMU" width="820">
+</p>
 
 | Command | Does |
 |---|---|
