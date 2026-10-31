@@ -27,6 +27,7 @@ accepted** - ADRs record the outcome of that discussion, they don't replace it.
 | [0016](0016-capability-implementation.md) | Capability system implementation (flat cap space, Untyped retype) | Accepted |
 | [0017](0017-threads-and-scheduling.md) | Threads, context switch, and scheduling | Accepted |
 | [0018](0018-synchronous-ipc.md) | Synchronous IPC over Endpoints | Accepted |
+| [0019](0019-first-user-task.md) | The first user task: loading, confinement and the syscall ABI | Proposed |
 
 New ADR: copy [0000-template.md](0000-template.md), take the next number, and
 open a PR labelled `adr`.
