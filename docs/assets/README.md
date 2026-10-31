@@ -10,6 +10,7 @@
 | `architecture.svg` | Layer diagram of the kernel | `scripts/brand/arch_svg.py` |
 | `boot-sequence.svg` | Boot flow from firmware to `kmain`'s steps | `scripts/brand/boot_svg.py` |
 | `dev-toolchain.svg`, `interrupt-flow.svg`, `timer-preemption.svg` | Step-by-step flows in the development and interrupts docs | `scripts/brand/flow_svg.py` |
+| `capabilities.svg`, `memory-layout.svg` | The capability model and the virtual address space | `scripts/brand/model_svg.py` |
 
 All text in the brand SVGs is converted to outlines, so they render the same
 everywhere without web fonts. To regenerate them you need Python with
@@ -28,6 +29,7 @@ python3 scripts/brand/term_svg.py build/serial-uefi.log docs/assets/boot-qemu.sv
 python3 scripts/brand/arch_svg.py docs/assets/architecture.svg
 python3 scripts/brand/boot_svg.py docs/assets/boot-sequence.svg
 python3 scripts/brand/flow_svg.py docs/assets
+python3 scripts/brand/model_svg.py docs/assets
 ```
 
 The PNG social preview is a screenshot of the SVG at 1280×640. Upload it under
