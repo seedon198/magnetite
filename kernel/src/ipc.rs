@@ -23,7 +23,8 @@ use capability::{
 use hal::sync::SpinLock;
 use sched::ThreadId;
 
-use crate::{CONTEXTS, SCHED};
+use crate::thread::{self, CONTEXTS};
+use crate::SCHED;
 
 /// Every thread's IPC state.
 static IPC: SpinLock<Ipc> = SpinLock::new(Ipc::new());
@@ -76,6 +77,13 @@ pub fn recv(ep: CapId, recv_slot: Option<CapId>) -> Result<Received, IpcError> {
 /// Answer the caller in this thread's reply slot.
 pub fn reply(msg: Message, cap: Option<CapId>) -> Result<(), IpcError> {
     invoke(None, |ipc, caps, _, me, _, _| ipc.reply(caps, me, msg, cap)).map(|_| ())
+}
+
+/// Clear exiting thread `t`'s IPC state; returns the threads to make ready (a
+/// caller that was waiting on `t` for a reply, now failed with `PeerExited`).
+/// Call with interrupts off.
+pub fn exit_thread(t: ThreadId) -> Outcome {
+    IPC.lock().exit(t)
 }
 
 /// The capability spaces as the engine sees them.
@@ -156,7 +164,7 @@ fn invoke(
             }
         };
         if let Some(next) = next {
-            hal::context::switch(&CONTEXTS[me.0], &CONTEXTS[next.0]);
+            thread::switch_to(me, next);
         }
         IPC.lock()
             .take_result(me)

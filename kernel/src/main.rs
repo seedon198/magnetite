@@ -16,6 +16,7 @@ mod banner;
 mod boot;
 mod ipc;
 mod log;
+mod thread;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -26,6 +27,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use hal::paging::{AddressSpace, Flags};
 use hal::serial::SerialPort;
 use hal::sync::SpinLock;
+use thread::CONTEXTS;
 
 /// The kernel's address space, established in [`init_paging`]. Held for later
 /// milestones (the heap and guard pages in #41, user address spaces in M4).
@@ -41,15 +43,6 @@ static HEAP: hal::heap::KernelHeap = hal::heap::KernelHeap::new();
 static SCHED: SpinLock<sched::Scheduler> = SpinLock::new(sched::Scheduler::new());
 /// Saved contexts, indexed by [`sched::ThreadId`]: boot, workers A/B, spinners
 /// C/D, IPC server and client.
-static CONTEXTS: [hal::context::Context; 7] = [
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-];
 /// Times each demo worker has been scheduled (proof the switch happened).
 static A_TICKS: AtomicU64 = AtomicU64::new(0);
 static B_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -171,6 +164,13 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // recoverable-probe + classification path.
     init_fault_diagnostics(boot_info);
 
+    // Per-thread kernel stacks (#82): each sits above an unmapped guard page.
+    assert!(
+        thread::selftest(),
+        "thread: kernel stack guard page check failed"
+    );
+    info!("thread: kernel stack guard page verified");
+
     // Untyped memory & retype (M3, #55): demonstrate carving object storage
     // from an Untyped region with watermark accounting.
     demo_untyped(boot_info);
@@ -291,6 +291,7 @@ fn init_paging(boot_info: &BootInfo) {
         return;
     };
     aspace.switch();
+    thread::init_kernel_root(aspace.root_phys());
     info!("paging: running on our own PML4 (higher half inherited)");
     *KERNEL_SPACE.lock() = Some(aspace);
 
@@ -827,7 +828,7 @@ fn pick_next() -> Option<(sched::ThreadId, sched::ThreadId)> {
 fn yield_now() {
     hal::cpu::without_interrupts(|| {
         if let Some((cur, next)) = pick_next() {
-            hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+            thread::switch_to(cur, next);
         }
     });
 }
@@ -836,19 +837,23 @@ fn yield_now() {
 /// to the next one. Its context is never resumed (and its stack is leaked).
 fn exit_current() -> ! {
     hal::cpu::disable_interrupts();
-    let (cur, next) = {
+    let cur = SCHED
+        .lock()
+        .current()
+        .expect("sched: exit with an empty run queue");
+    // A caller waiting on this thread for a reply would wait forever: wake it
+    // with an error (lock order: IPC before SCHED).
+    let woken = ipc::exit_thread(cur);
+    let next = {
         let mut s = SCHED.lock();
-        let Some(cur) = s.current() else {
-            panic!("sched: exit with an empty run queue");
-        };
+        for t in woken.woken() {
+            s.admit(t);
+        }
         s.remove(cur);
         // Removing the front makes the next thread in line current.
-        let Some(next) = s.current() else {
-            panic!("sched: the last runnable thread exited");
-        };
-        (cur, next)
+        s.current().expect("sched: the last runnable thread exited")
     };
-    hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+    thread::switch_to(cur, next);
     unreachable!("sched: an exited thread was resumed");
 }
 
@@ -867,15 +872,15 @@ fn timer_interrupt(frame: &mut hal::idt::TrapFrame) {
     // before this handler resumes, and the APIC delivers no further timer
     // interrupt until this one is acknowledged.
     hal::lapic::eoi();
-    // Only kernel-mode code is preempted for now: ring 3 enters on the single
-    // TSS.rsp0 stack, which two preempted user threads would share. Per-thread
-    // kernel stacks arrive with the first user task (#82).
-    if frame.cs & 3 != 0 {
-        return;
-    }
+    // Ring 3 is preempted too: each user thread enters the kernel on its own
+    // kernel stack (#82), so its TrapFrame stays put while others run.
+    let from_user = frame.cs & 3 == 3;
     if let Some((cur, next)) = pick_next() {
         PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
-        hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+        if from_user {
+            thread::USER_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        thread::switch_to(cur, next);
     }
 }
 
