@@ -44,6 +44,7 @@ dependencies = [
  "boot-info",
  "capability",
  "hal",
+ "ipc",
  "limine",
  "sched",
 ]
