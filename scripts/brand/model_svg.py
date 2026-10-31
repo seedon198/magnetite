@@ -108,7 +108,7 @@ s.rect(OX + 14, y + 50, (OW - 28) * 0.42, 10, ACCENT, ACCENT, rx=3)
 s.text(OX + OW - 14, y + 70, "watermark", 10, MUTED, 400, "end", MONO)
 objs["Untyped"] = y + 37
 y += 74 + 14
-for kind, note in [("CNode", "slots holding capabilities"), ("Endpoint", "synchronous IPC rendezvous (#81)"),
+for kind, note in [("CNode", "slots holding capabilities"), ("Endpoint", "synchronous IPC rendezvous"),
                    ("Notification", "asynchronous signal word"), ("Frame", "one physical page, mappable")]:
     s.rect(OX, y, OW, 44, BOX, SOLID)
     s.text(OX + 14, y + 19, kind, 12.5, FG, 600)

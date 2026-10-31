@@ -6,7 +6,7 @@
 //! previously occupied that memory (important when an Untyped region is revoked
 //! and reused). See [ADR 0016](../../docs/adr/0016-capability-implementation.md).
 
-use capability::object::{ObjectRef, Untyped};
+use capability::object::{EndpointState, ObjectRef, Untyped};
 use capability::space::{CapSpace, Slot};
 
 /// Carve `count` objects of `size` bytes each (aligned to `align`) from
@@ -79,6 +79,33 @@ pub fn store_untyped(phys: u64, hhdm: u64, untyped: Untyped) {
     // SAFETY: as in `load_untyped`; the caller owns aligned storage for one
     // `repr(C)` `Untyped` at `phys`.
     unsafe { ptr.write(untyped) }
+}
+
+/// Load the [`EndpointState`] of the Endpoint whose storage is at physical
+/// `phys`, via the HHDM.
+///
+/// The caller must pass a `phys` that is a retyped Endpoint's storage (zeroed
+/// at retype, then written only by [`store_endpoint`]); safe wrapper over
+/// internal `unsafe`.
+#[must_use]
+pub fn load_endpoint(phys: u64, hhdm: u64) -> EndpointState {
+    let ptr = (hhdm + phys) as *const EndpointState;
+    // SAFETY: per the contract, `phys` is an Endpoint's retyped storage in our
+    // HHDM-mapped RAM, sized and aligned for `EndpointState` (its fixed
+    // layout); the type is `repr(C)`, `Copy`, and valid for any bit pattern
+    // of its four `u64`s, so this read is sound.
+    unsafe { ptr.read() }
+}
+
+/// Store an Endpoint's [`EndpointState`] at physical `phys`, via the HHDM.
+///
+/// The caller must pass a retyped Endpoint's storage, as for
+/// [`load_endpoint`]; safe wrapper over internal `unsafe`.
+pub fn store_endpoint(phys: u64, hhdm: u64, state: EndpointState) {
+    let ptr = (hhdm + phys) as *mut EndpointState;
+    // SAFETY: as in `load_endpoint`; the caller owns that aligned,
+    // `EndpointState`-sized storage at `phys`.
+    unsafe { ptr.write(state) }
 }
 
 /// OR `bits` into the signal word of the Notification whose state lives at

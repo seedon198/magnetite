@@ -26,7 +26,7 @@ accepted** - ADRs record the outcome of that discussion, they don't replace it.
 | [0015](0015-kaslr.md) | Kernel KASLR via a position-independent image | Accepted |
 | [0016](0016-capability-implementation.md) | Capability system implementation (flat cap space, Untyped retype) | Accepted |
 | [0017](0017-threads-and-scheduling.md) | Threads, context switch, and scheduling | Accepted |
-| [0018](0018-synchronous-ipc.md) | Synchronous IPC over Endpoints | Proposed |
+| [0018](0018-synchronous-ipc.md) | Synchronous IPC over Endpoints | Accepted |
 
 New ADR: copy [0000-template.md](0000-template.md), take the next number, and
 open a PR labelled `adr`.

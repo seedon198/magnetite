@@ -73,14 +73,18 @@ impl ObjectKind {
 }
 
 /// The storage state of an [`Endpoint`](ObjectKind::Endpoint), living in its
-/// retyped memory. Zeroed on creation; the blocked-thread queues are populated
-/// when synchronous IPC lands (M4). Fields reserved now so the layout is stable.
+/// retyped memory. Zeroed on creation, which is an empty queue. The `ipc` crate
+/// owns the encoding of these words (ADR 0018); the layout stays four words.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EndpointState {
-    /// Head of the queue of threads blocked on this endpoint (0 = empty).
+    /// First thread blocked on this endpoint, encoded `id + 1` (0 = none).
     pub queue_head: u64,
-    _reserved: [u64; 3],
+    /// Last thread blocked on this endpoint, encoded `id + 1` (0 = none).
+    pub queue_tail: u64,
+    /// Whether the blocked threads are senders or receivers (0 = empty).
+    pub queue_kind: u64,
+    _reserved: u64,
 }
 
 /// The storage state of a [`Notification`](ObjectKind::Notification).
@@ -261,6 +265,18 @@ mod tests {
         assert_eq!(ObjectKind::Untyped.fixed_layout(), None);
         assert_eq!(ObjectKind::CNode.fixed_layout(), None);
         assert_eq!(ObjectKind::Thread.fixed_layout(), None);
+    }
+
+    #[test]
+    fn endpoint_state_is_four_words() {
+        let s = EndpointState {
+            queue_head: 1,
+            queue_tail: 2,
+            queue_kind: 3,
+            ..EndpointState::default()
+        };
+        assert_eq!(size_of::<EndpointState>(), 32);
+        assert_eq!((s.queue_head, s.queue_tail, s.queue_kind), (1, 2, 3));
     }
 
     #[test]

@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod banner;
 mod boot;
+mod ipc;
 mod log;
 
 use alloc::boxed::Box;
@@ -35,11 +36,14 @@ static KERNEL_SPACE: SpinLock<Option<AddressSpace>> = SpinLock::new(None);
 static HEAP: hal::heap::KernelHeap = hal::heap::KernelHeap::new();
 
 /// Round-robin scheduler (#78). Thread 0 is the boot thread; 1 and 2 are the
-/// cooperative demo workers; 3 and 4 are the preemption demo spinners (#80).
+/// cooperative demo workers; 3 and 4 are the preemption demo spinners (#80);
+/// 5 and 6 are the IPC demo's server and client (#81).
 static SCHED: SpinLock<sched::Scheduler> = SpinLock::new(sched::Scheduler::new());
 /// Saved contexts, indexed by [`sched::ThreadId`]: boot, workers A/B, spinners
-/// C/D.
-static CONTEXTS: [hal::context::Context; 5] = [
+/// C/D, IPC server and client.
+static CONTEXTS: [hal::context::Context; 7] = [
+    hal::context::Context::new(),
+    hal::context::Context::new(),
     hal::context::Context::new(),
     hal::context::Context::new(),
     hal::context::Context::new(),
@@ -193,6 +197,10 @@ fn kmain(boot_info: &BootInfo) -> ! {
     if preemptive {
         demo_preemption();
     }
+
+    // Synchronous IPC (M4, #81): a client and a server kernel thread, each with
+    // its own capability space, call and reply over an Endpoint.
+    ipc::demo(boot_info);
 
     // Exercise the trap path end to end: a breakpoint (#BP) is a recoverable
     // trap, so the handler prints a report and execution resumes here.

@@ -66,7 +66,7 @@ budget and cannot exhaust kernel memory.
 | `Untyped` | unused physical memory | control block + region | retype works |
 | `CNode` | a capability-space node | `Slot` array | backs the cap space |
 | `Frame` | a physical page | one page | create + identify |
-| `Endpoint` | a synchronous IPC rendezvous | zeroed state struct | object only; IPC is M4 |
+| `Endpoint` | a synchronous IPC rendezvous | its blocked-thread queue | IPC works between kernel threads (#81); user mode in #82 |
 | `Notification` | an async signal | signal word + waiters | signal works; wait is M4 |
 | `AddressSpace` | a page-table root | a PML4 | object only; user mapping is M4 |
 | `Thread` | a schedulable context | - | M4 |
@@ -100,8 +100,11 @@ raw register arguments into a `Method` and calls this same path.
 
 These need threads / userspace:
 
-- **Blocking synchronous IPC** - `Endpoint` send / receive / call with
-  capability transfer.
+- **Blocking synchronous IPC** - done for kernel threads (#81,
+  [ADR 0018](../adr/0018-synchronous-ipc.md)): Send, Recv, Call, Reply and
+  ReplyRecv, badges, and one-capability transfer under `GRANT`. The engine is
+  the pure, host-tested `ipc` crate; user threads reach it through the
+  `syscall` boundary in #82.
 - **The `syscall` boundary** - the ring-3 entry that invokes capabilities.
 - **`Thread`** objects, and user `AddressSpace` mapping.
 - **Untyped splitting** (retyping Untyped → child Untyped) and whole-region

@@ -30,12 +30,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipc"
+version = "0.0.1"
+dependencies = [
+ "capability",
+ "sched",
+]
+
+[[package]]
 name = "kernel"
 version = "0.0.1"
 dependencies = [
  "boot-info",
  "capability",
  "hal",
+ "ipc",
  "limine",
  "sched",
 ]
