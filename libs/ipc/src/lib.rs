@@ -757,6 +757,159 @@ mod tests {
     }
 
     #[test]
+    fn call_naming_full_reply_slot_fails() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 4, frame());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, None);
+        let o = ipc.call(
+            &mut c,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            Some(CapId(4)),
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::ReceiveSlotFull)));
+        assert_eq!(
+            (ep.kind, ep.head),
+            (QueueKind::Receivers, Some(T1)),
+            "the server keeps waiting"
+        );
+        assert_eq!(ipc.take_result(T1), None);
+    }
+
+    #[test]
+    fn reply_recv_failed_reply_skips_receive() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        let (server, client, other) = (T1, T2, T3);
+        ipc.recv(&mut c, &mut ep, server, Rights::RECV, None);
+        ipc.call(
+            &mut c,
+            &mut ep,
+            client,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.take_result(server);
+        ipc.send(
+            &mut c,
+            &mut ep,
+            other,
+            Rights::SEND,
+            0,
+            msg(2, 0, [0; 4]),
+            None,
+        );
+        c.put(server, 3, frame());
+        let o = ipc.reply_recv(
+            &mut c,
+            &mut ep,
+            server,
+            Rights::RECV,
+            with_cap(9),
+            Some(CapId(3)),
+            None,
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(server), Some(Err(IpcError::NoReceiveSlot)));
+        assert_eq!(ipc.take_result(client), None, "the caller still waits");
+        assert_eq!(
+            (ep.kind, ep.head),
+            (QueueKind::Senders, Some(other)),
+            "the receive half did not run"
+        );
+        let o = ipc.reply(&mut c, server, msg(9, 0, [0; 4]), None);
+        assert_eq!(
+            woken(&o),
+            [Some(client), None, None, None],
+            "the slot kept the caller"
+        );
+    }
+
+    #[test]
+    fn reply_recv_replies_then_blocks() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        let (server, client) = (T1, T2);
+        ipc.recv(&mut NoCaps, &mut ep, server, Rights::RECV, None);
+        ipc.call(
+            &mut NoCaps,
+            &mut ep,
+            client,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.take_result(server);
+        let o = ipc.reply_recv(
+            &mut NoCaps,
+            &mut ep,
+            server,
+            Rights::RECV,
+            msg(9, 0, [0; 4]),
+            None,
+            None,
+        );
+        assert_eq!(o.caller, Effect::Block);
+        assert_eq!(woken(&o), [Some(client), None, None, None]);
+        assert_eq!(
+            ipc.take_result(client)
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .info
+                .label(),
+            9
+        );
+        assert_eq!(ipc.take_result(server), None);
+        assert_eq!((ep.kind, ep.head), (QueueKind::Receivers, Some(server)));
+    }
+
+    #[test]
+    fn reply_recv_full_recv_slot_does_not_reply() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        let (server, client) = (T1, T2);
+        ipc.recv(&mut c, &mut ep, server, Rights::RECV, None);
+        ipc.call(
+            &mut c,
+            &mut ep,
+            client,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.take_result(server);
+        c.put(server, 6, frame());
+        let o = ipc.reply_recv(
+            &mut c,
+            &mut ep,
+            server,
+            Rights::RECV,
+            msg(9, 0, [0; 4]),
+            None,
+            Some(CapId(6)),
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [None; 4], "no reply was sent");
+        assert_eq!(
+            ipc.take_result(server),
+            Some(Err(IpcError::ReceiveSlotFull))
+        );
+        assert_eq!(ipc.take_result(client), None);
+    }
+
+    #[test]
     fn endpoint_queue_roundtrips_through_state() {
         let q = EndpointQueue {
             head: Some(ThreadId(0)),

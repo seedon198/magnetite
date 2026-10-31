@@ -21,7 +21,7 @@ All notable changes are documented here. The format follows
 
 - Blocking synchronous IPC over Endpoints (#81), per
   [ADR 0018](docs/adr/0018-synchronous-ipc.md). A new pure crate `ipc`
-  (`#![forbid(unsafe_code)]`, 27 host tests) holds the engine: Send, Recv,
+  (`#![forbid(unsafe_code)]`, 31 host tests) holds the engine: Send, Recv,
   Call, Reply and ReplyRecv, a one-shot reply slot, FIFO endpoint queues
   stored in `EndpointState`, and receiver-visible badges. Only the message
   registers in use are delivered, the rest zeroed. A message carries one

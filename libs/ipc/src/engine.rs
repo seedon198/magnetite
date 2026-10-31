@@ -301,6 +301,14 @@ impl Ipc {
         if let Err(e) = Self::sender_checks(caps, me, &msg, cap) {
             return self.fail(me, e);
         }
+        // A caller consents to a capability in the reply by naming an empty
+        // slot; a full one is its own mistake, refused now rather than failing
+        // the server's reply later.
+        if let Some(Some(slot)) = call {
+            if !caps.is_empty(me, slot) {
+                return self.fail(me, IpcError::ReceiveSlotFull);
+            }
+        }
         let pending = Pending {
             msg,
             badge: ep_badge,
