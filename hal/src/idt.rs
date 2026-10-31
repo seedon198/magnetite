@@ -79,6 +79,25 @@ pub fn register_handler(vector: u8, handler: Handler) {
     HANDLERS[vector as usize].store(handler as usize as u64, Ordering::Release);
 }
 
+/// The kernel's handler for CPU exceptions raised in ring 3 (0 = none). It
+/// never returns: it ends the faulting thread (ADR 0019).
+static USER_FAULT: AtomicU64 = AtomicU64::new(0);
+
+/// A handler for an exception taken in ring 3; it must not return.
+pub type UserFaultHandler = fn(&mut TrapFrame) -> !;
+
+/// Route CPU exceptions (vectors 0 to 31) raised **in ring 3** to `handler`,
+/// instead of the fatal kernel report. Exceptions in ring 0 are unaffected.
+pub fn register_user_fault(handler: UserFaultHandler) {
+    USER_FAULT.store(handler as usize as u64, Ordering::Release);
+}
+
+/// The faulting linear address of the last page fault (`CR2`).
+#[must_use]
+pub fn fault_address() -> u64 {
+    read_cr2()
+}
+
 /// Common dispatch routine, called by the assembly common stub with a pointer
 /// to the freshly built [`TrapFrame`].
 ///
@@ -86,6 +105,19 @@ pub fn register_handler(vector: u8, handler: Handler) {
 #[unsafe(no_mangle)]
 extern "C" fn idt_dispatch(frame: &mut TrapFrame) {
     let slot = HANDLERS[(frame.vector as usize) & (IDT_LEN - 1)].load(Ordering::Acquire);
+    // A CPU exception raised in ring 3 with no specific handler ends the user
+    // thread, not the kernel. Keyed on the trap frame's CS, never on which
+    // thread is current, so a kernel-mode fault is always fatal.
+    if slot == 0 && frame.vector < 32 && frame.cs & 3 == 3 {
+        let user = USER_FAULT.load(Ordering::Acquire);
+        if user != 0 {
+            // SAFETY: `user` is non-zero only because `register_user_fault`
+            // stored a valid `UserFaultHandler` there; transmuted back to it.
+            let handler: UserFaultHandler =
+                unsafe { core::mem::transmute::<usize, UserFaultHandler>(user as usize) };
+            handler(frame);
+        }
+    }
     if slot != 0 {
         // SAFETY: `slot` is non-zero only because `register_handler` stored a
         // valid `Handler` (`fn(&mut TrapFrame)`) pointer there; we transmute it

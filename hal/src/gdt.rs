@@ -160,6 +160,20 @@ struct DescriptorTablePointer {
     base: u64,
 }
 
+/// Point `TSS.rsp0`, the stack the CPU switches to on an interrupt or
+/// exception taken in ring 3, at `top`. The kernel calls this on every context
+/// switch with the next thread's kernel stack (ADR 0019). Call with interrupts
+/// off, so no ring-3 entry can observe a half-updated value.
+pub fn set_rsp0(top: u64) {
+    // SAFETY: the TSS is initialized by `init` and only ever written here and
+    // there, on this single CPU with interrupts off (see `Racy`). The packed
+    // field is written unaligned through a raw pointer.
+    unsafe {
+        let tss = TSS.get();
+        core::ptr::addr_of_mut!((*tss).privilege_stacks[0]).write_unaligned(top);
+    }
+}
+
 /// Install our GDT and TSS, reload the segment registers, and load the task
 /// register. Call once, early in boot, before setting up the IDT.
 pub fn init() {

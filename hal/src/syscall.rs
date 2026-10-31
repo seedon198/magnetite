@@ -33,6 +33,8 @@ const FMASK_VALUE: u64 = 0x200 | 0x100 | 0x400 | 0x4_0000;
 /// Raw system-call arguments, as the entry stub lays them out.
 #[repr(C)]
 pub struct SyscallArgs {
+    /// The syscall number (`rax`).
+    pub number: u64,
     /// Invoked capability id (`rdi`).
     pub cap: u64,
     /// Packed `MessageInfo` (`rsi`).
@@ -71,13 +73,21 @@ static SYSCALL_KSTACK: Racy<KStack> = Racy::new(KStack([0; 16 * 1024]));
 /// assembly can reach it by name.)
 #[unsafe(no_mangle)]
 static SYSCALL_KSTACK_TOP: AtomicU64 = AtomicU64::new(0);
-/// Scratch slot where the entry stub parks the user `rsp` across a call.
+/// Scratch slot the entry stub uses for one instruction, to move the user
+/// `rsp` onto the kernel stack. Never held across the call: a thread that
+/// blocks inside a syscall keeps its user `rsp` on its own kernel stack.
 #[unsafe(no_mangle)]
 static SYSCALL_USER_RSP: AtomicU64 = AtomicU64::new(0);
 
 /// Register the kernel's system-call handler. Call before entering ring 3.
 pub fn register(handler: Handler) {
     HANDLER.store(handler as *mut (), Ordering::Release);
+}
+
+/// Set the kernel stack the entry stub switches to. The kernel calls this on
+/// every context switch with the next thread's kernel stack (ADR 0019).
+pub fn set_kernel_stack(top: u64) {
+    SYSCALL_KSTACK_TOP.store(top, Ordering::Relaxed);
 }
 
 /// Program the syscall MSRs and the kernel stack top. Call once, after the GDT
@@ -113,6 +123,16 @@ pub fn enter_user(save: &crate::context::Context, entry: &UserEntry) {
     unsafe { enter_user_asm(save.save_ptr(), entry as *const UserEntry) }
 }
 
+/// Drop to ring 3 for good with `entry`'s registers, saving nothing. A user
+/// thread's kernel trampoline calls this once; the thread then lives in ring 3
+/// and returns to the kernel only through syscalls and interrupts.
+pub fn enter_user_once(entry: &UserEntry) -> ! {
+    // SAFETY: `entry` describes a mapped, user-accessible code page and stack
+    // in the current address space; the asm loads the message registers and
+    // `iretq`s to ring 3 with IF set, never returning.
+    unsafe { enter_user_once_asm(entry as *const UserEntry) }
+}
+
 /// The Rust trampoline the entry stub calls: dispatch to the registered handler.
 #[unsafe(no_mangle)]
 extern "C" fn syscall_dispatch(args: *const SyscallArgs) -> u64 {
@@ -131,13 +151,17 @@ extern "C" fn syscall_dispatch(args: *const SyscallArgs) -> u64 {
 extern "C" {
     fn syscall_entry();
     fn enter_user_asm(save_rsp_to: *mut u64, entry: *const UserEntry);
+    fn enter_user_once_asm(entry: *const UserEntry) -> !;
 }
 
 // The syscall entry stub (LSTAR target). `syscall` leaves the user rsp in rsp
 // (it does not switch stacks), the return RIP in rcx, and RFLAGS in r11. We park
-// the user rsp, switch to the kernel stack, build a `SyscallArgs` on it, call the
-// dispatcher, then restore and `sysretq`. Message ABI: rdi=cap, rsi=msg_info,
-// rdx/r8/r9/r10 = mr0..3; rax = status out.
+// the user rsp in a scratch slot for one instruction, switch to the kernel stack
+// and push it there (so a thread that blocks in a syscall keeps its own), build a
+// `SyscallArgs` on it, call the dispatcher, then restore and `sysretq`. IF is clear
+// throughout (FMASK). ABI: rax=number, rdi=cap, rsi=msg_info, rdx/r8/r9/r10 =
+// mr0..3; rax = status out. Ten words are pushed, keeping rsp 16-byte aligned for
+// the call.
 //
 // enter_user_asm saves the current callee-saved frame (so `resume` can return
 // here) and `iretq`s to ring 3 with the message registers loaded. User
@@ -148,20 +172,22 @@ global_asm!(
     "syscall_entry:",
     "    mov [rip + SYSCALL_USER_RSP], rsp",
     "    mov rsp, [rip + SYSCALL_KSTACK_TOP]",
-    "    push rcx", // user RIP
-    "    push r11", // user RFLAGS
-    "    push r10", // mr3
-    "    push r9",  // mr2
-    "    push r8",  // mr1
-    "    push rdx", // mr0
-    "    push rsi", // msg_info
-    "    push rdi", // cap  -> rsp = &SyscallArgs
+    "    push qword ptr [rip + SYSCALL_USER_RSP]", // user RSP, kept on this stack
+    "    push rcx",                                // user RIP
+    "    push r11",                                // user RFLAGS
+    "    push r10",                                // mr3
+    "    push r9",                                 // mr2
+    "    push r8",                                 // mr1
+    "    push rdx",                                // mr0
+    "    push rsi",                                // msg_info
+    "    push rdi",                                // cap
+    "    push rax",                                // number  -> rsp = &SyscallArgs
     "    mov rdi, rsp",
     "    call syscall_dispatch",
-    "    add rsp, 48", // pop the six SyscallArgs words (rax holds status)
+    "    add rsp, 56", // pop the seven SyscallArgs words (rax holds status)
     "    pop r11",
     "    pop rcx",
-    "    mov rsp, [rip + SYSCALL_USER_RSP]",
+    "    pop rsp", // user RSP
     "    sysretq",
     //
     ".global enter_user_asm",
@@ -188,5 +214,28 @@ global_asm!(
     "    push 0x202",          // RFLAGS (IF set)
     "    push 0x2b",           // user CS
     "    push rax",            // user RIP
+    "    iretq",
+    //
+    ".global enter_user_once_asm",
+    ".p2align 4",
+    "enter_user_once_asm:",
+    "    mov r11, rdi",        // UserEntry*
+    "    mov rax, [r11 + 0]",  // rip
+    "    mov rbx, [r11 + 8]",  // rsp
+    "    mov rdi, [r11 + 16]", // cap
+    "    mov rsi, [r11 + 24]", // msg_info
+    "    mov rdx, [r11 + 32]", // mr0
+    "    mov r8,  [r11 + 40]", // mr1
+    "    mov r9,  [r11 + 48]", // mr2
+    "    mov r10, [r11 + 56]", // mr3
+    "    push 0x23",           // user SS
+    "    push rbx",            // user RSP
+    "    push 0x202",          // RFLAGS (IF set)
+    "    push 0x2b",           // user CS
+    "    push rax",            // user RIP
+    "    xor eax, eax",
+    "    xor ebx, ebx",
+    "    xor ecx, ecx",
+    "    xor r11d, r11d",
     "    iretq",
 );
