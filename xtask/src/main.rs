@@ -7,6 +7,7 @@
 //! assembling a bootable ISO, and launching it in QEMU.
 //!
 //! Commands:
+//! - `test`                     run the host workspace tests
 //! - `build`                    cross-compile the kernel
 //! - `iso`                      build `build/kernel.iso`
 //! - `run [--bios|--kvm] [-- <qemu args>]`    build the ISO and boot in QEMU
@@ -29,6 +30,7 @@ fn main() {
     let task = args.next().unwrap_or_default();
     let rest: Vec<String> = args.collect();
     match task.as_str() {
+        "test" => run(&cargo(), &["test"]),
         "build" => {
             build();
         }
@@ -46,7 +48,7 @@ fn main() {
 }
 
 fn usage(code: i32) -> ! {
-    eprintln!("usage: cargo xtask <build|iso|run|debug> [--bios|--kvm] [-- <qemu args>]");
+    eprintln!("usage: cargo xtask <test|build|iso|run|debug> [--bios|--kvm] [-- <qemu args>]");
     exit(code);
 }
 
