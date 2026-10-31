@@ -19,6 +19,21 @@ All notable changes are documented here. The format follows
 
 ### M4: Scheduling & userspace
 
+- Blocking synchronous IPC over Endpoints (#81), per
+  [ADR 0018](docs/adr/0018-synchronous-ipc.md). A new pure crate `ipc`
+  (`#![forbid(unsafe_code)]`, 27 host tests) holds the engine: Send, Recv,
+  Call, Reply and ReplyRecv, a one-shot reply slot, FIFO endpoint queues
+  stored in `EndpointState`, and receiver-visible badges. Only the message
+  registers in use are delivered, the rest zeroed. A message carries one
+  capability, copied under `GRANT` into an empty slot the receiver named; a
+  transfer that cannot complete fails the sender and moves nothing, and a
+  reply carries a capability only into a slot the caller named. The kernel
+  (`kernel/src/ipc.rs`) applies the engine's verdict to the scheduler,
+  blocking and waking threads with interrupts off. `kmain` proves it with a
+  client and a server kernel thread, each with its own capability space.
+  Verified in QEMU. CI now lints and tests every host crate (`cargo xtask
+  test`), not only `boot-info`.
+
 - Boot banner: `kmain` opens with the Fe₃O₄ tile logo in ASCII, the wordmark,
   version (`git describe`, stamped by the new `kernel/build.rs` with the
   `rustc` version and build profile) and pre-alpha status, then a system

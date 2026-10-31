@@ -49,7 +49,7 @@ boxes(y + 38, 62, [
 
 y = 150
 rect(24, y, W - 48, 34, "#18213a", ACCENT, rx=6)
-text(W / 2, y + 22, "syscall / sysret  ·  capability invocation  ·  synchronous IPC (#81)", 12.5, ACCENT, 600, "middle")
+text(W / 2, y + 22, "syscall / sysret  ·  capability invocation  ·  synchronous IPC", 12.5, ACCENT, 600, "middle")
 
 y = 198
 layer(y, 150, "Kernel · ring 0", "#![deny(unsafe_code)] · linker glue only in boot/")
@@ -57,7 +57,7 @@ boxes(y + 38, 96, [
     ("Capabilities", ["CNode capability space", "Untyped memory + retype", "rights-checked invoke", "attenuate-only rights"], False),
     ("Scheduling", ["threads, context switch", "round-robin policy", "LAPIC timer preemption", ""], False),
     ("Memory", ["frame allocator (bitmap)", "own page tables, HHDM", "W^X, NX, KASLR", "guard pages, heap"], False),
-    ("IPC", ["Endpoint send / recv", "call / reply", "capability transfer", "badges (#81)"], True),
+    ("IPC", ["Endpoint send / recv", "call / reply", "capability transfer", "badges"], False),
 ])
 
 y = 362

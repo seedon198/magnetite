@@ -62,7 +62,7 @@ What works on `main` today, verified on every boot in QEMU:
 | **Memory safety** | No `unsafe` outside `hal`, where every block carries a `// SAFETY:` justification, and the kernel's `boot` module, which holds only linker glue. Pure crates `#![forbid(unsafe_code)]`; the kernel `#![deny(unsafe_code)]`; CI-checked ([ADR 0007](docs/adr/0007-unsafe-policy.md)) |
 | **Exploit mitigations** | W^X enforced and self-verified, NX on everything including the direct map, SMEP and SMAP, KASLR, unmapped stack guard pages |
 | **Capabilities** | CNode-backed capability spaces, Untyped memory and retype (the kernel never heap-allocates objects), attenuate-only rights, rights-checked invocation |
-| **Threads** | Context switching, a round-robin scheduler, ring-3 entry and a `syscall`/`sysret` boundary with a message-register ABI |
+| **Threads and IPC** | Context switching, LAPIC-timer preemption, ring-3 entry and a `syscall`/`sysret` boundary; blocking synchronous IPC with badges and capability transfer under `GRANT` |
 | **Diagnostics** | Exception register dumps, page-fault classification (guard page, heap, text, direct map), backtraces |
 | **Testable core** | Policy lives in pure `no_std` crates (`capability`, `sched`, `frame-alloc`, `page-table`, `boot-info`) that are unit-tested on the host |
 

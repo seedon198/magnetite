@@ -85,7 +85,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 - [x] Threads, context switch, round-robin scheduler (#78)
 - [x] Preemptive scheduling via the LAPIC timer (#80)
 - [x] Ring 3 entry/return (`syscall`/`sysret`) with SMEP/SMAP (#79)
-- [ ] Blocking synchronous IPC: `Endpoint` send/receive/call, capability transfer (#81)
+- [x] Blocking synchronous IPC: `Endpoint` send/receive/call, capability transfer (#81)
 - [ ] First user task running under a restricted capability set (#82)
 - [ ] FPU/SSE state save and restore (#83)
 - [ ] Docs: threads, scheduling, IPC and the syscall boundary (#84)

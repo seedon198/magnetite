@@ -77,6 +77,7 @@ steps = [
     ("M4", "threads, round-robin context switch"),
     ("M4", "ring 3 entry and the syscall boundary"),
     ("M4", "LAPIC timer: preemptive scheduling"),
+    ("M4", "synchronous IPC between kernel threads"),
 ]
 rows = (len(steps) + 1) // 2
 h = 56 + 24 * rows + 30
@@ -99,7 +100,7 @@ arrow(y, y + GAP); y += GAP
 
 y = card(y, "Root server", "user space · planned (M5)", [
     "first user task, holding only the capabilities it was granted (#82)",
-    "brings up drivers, network and filesystems as servers over IPC (#81)",
+    "brings up drivers, network and filesystems as servers over IPC",
 ], dashed=True)
 
 y += 18
