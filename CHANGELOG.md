@@ -19,6 +19,19 @@ All notable changes are documented here. The format follows
 
 ### M4: Scheduling & userspace
 
+- User-mode mechanism (#82, PR 1 of 2), per
+  [ADR 0019](docs/adr/0019-first-user-task.md). Each user task gets its own
+  address space (`AddressSpace::new_user`), sharing a kernel half whose
+  top-level entries are all populated once at boot. Each thread gets its own
+  16 KiB kernel stack above an unmapped guard page, and one `switch_to` path
+  points `TSS.rsp0` and the syscall entry at it and loads the thread's address
+  space. So the timer now preempts ring 3, and the syscall stub keeps the user
+  `rsp` on the thread's own stack, ready for threads that block in syscalls.
+  A CPU exception raised in ring 3 ends only that task; a caller waiting on it
+  for a reply is woken with `PeerExited` (`Ipc::exit`). Verified in QEMU: two
+  hand-assembled tasks say hello from ring 3, are preempted there and exit,
+  and a third that reads kernel memory is killed while the kernel boots on.
+
 - Blocking synchronous IPC over Endpoints (#81), per
   [ADR 0018](docs/adr/0018-synchronous-ipc.md). A new pure crate `ipc`
   (`#![forbid(unsafe_code)]`, 31 host tests) holds the engine: Send, Recv,

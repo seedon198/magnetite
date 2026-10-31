@@ -21,6 +21,7 @@ in ordinary **user** address spaces, not in the kernel half.
 | `0x0000000000001000` | `0x00007fffffffffff` | ~128 TiB | **User space** (per task: a server or tool) |
 | `0x0000800000000000` | `0xffff7fffffffffff` | - | Non-canonical hole (#GP on access) |
 | `0xffff800000000000` | HHDM + RAM | ≤ 64 TiB | **HHDM** - direct map of physical memory (offset from Limine) |
+| `0xfffffd0000000000` | grows up | 20 KiB per thread | **Kernel stacks** - per thread: an unmapped guard page, then 16 KiB RW+NX (PML4 slot 506, #82) |
 | `0xfffffe0000000000` | `0xfffffe0000000fff` | 4 KiB | **LAPIC registers** - xAPIC MMIO page, uncached RW+NX (PML4 slot 508, #80) |
 | `0xffffffff90000000` | grows up | window | **Kernel heap** - frames mapped on demand (RW+NX) |
 | *KASLR base* | … | 2 GiB window | **Kernel image** - randomized within the top 2 GiB |
@@ -45,6 +46,17 @@ Sections are page-aligned in the linker script and mapped with exactly these
 permissions once the kernel installs its own page tables. **No page is ever
 both writable and executable** (W^X), enforced for kernel and user mappings
 alike.
+
+## User address spaces (#82)
+
+Each user task has its own PML4 ([ADR 0019](../adr/0019-first-user-task.md)).
+Its kernel half (entries 256 to 511) is copied from the kernel's, and every one
+of those entries is populated once at boot, so anything the kernel maps later
+lands in tables all spaces share. The kernel half is supervisor-only: a user
+access faults and ends the task. Today a user thread maps its code read and
+execute at `0x400000`, and a one-page stack read and write, never execute, at
+`0x7ffff000`, with the page below it left unmapped as a guard. No page is both
+writable and executable.
 
 ## Isolation
 

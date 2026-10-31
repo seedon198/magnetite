@@ -1,6 +1,6 @@
 # 0017: Threads, context switch, and scheduling
 
-- **Status:** Accepted
+- **Status:** Accepted; decision 1's timing amended by [0019](0019-first-user-task.md)
 - **Date:** 2026-10-28
 
 ## Context

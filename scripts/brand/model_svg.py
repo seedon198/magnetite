@@ -153,9 +153,10 @@ rows = [
     ("0xffffffff80000000", "top", "Kernel image", "randomized base in the top 2 GiB (KASLR)", [], "kernel", 112),
     ("0xffffff8000000000", "0xffffffff80000000", "Kernel heap", "grows up on demand, capped below the KASLR window", ["RW", "NX"], "kernel", 48),
     ("0xfffffe0000000000", "+4 KiB", "LAPIC registers", "one uncached page for the timer", ["RW", "NX", "UC"], "kernel", 44),
+    ("0xfffffd0000000000", "", "Kernel stacks", "16 KiB per thread, unmapped guard page below", ["RW", "NX"], "kernel", 44),
     ("0xffff800000000000", "", "HHDM", "direct map of all physical RAM", ["RW", "NX"], "kernel", 48),
     ("0x0000800000000000", "0xffff7fffffffffff", "Non-canonical hole", "any access raises #GP", [], "hole", 40),
-    ("0x0000000000001000", "0x00007fffffffffff", "User space", "one per task; today a ring-3 stub at 0x40000000", ["U"], "user", 56),
+    ("0x0000000000001000", "0x00007fffffffffff", "User space", "one per task: code at 0x400000, stack below 0x80000000", ["U"], "user", 56),
     ("0x0000000000000000", "0x0000000000000fff", "Unmapped", "catches NULL dereferences", [], "hole", 44),
 ]
 y = 64
