@@ -137,7 +137,7 @@ fn decode(w: u64) -> Option<ThreadId> {
 mod tests {
     use super::*;
 
-    use capability::{CapError, CapId, Capability, Rights};
+    use capability::{CapError, CapId, CapSpace, Capability, Rights, Slot};
 
     /// For tests that move no capabilities: any capability access is a bug.
     struct NoCaps;
@@ -435,6 +435,325 @@ mod tests {
         let r = ipc.take_result(server).unwrap().unwrap().unwrap();
         assert_eq!((r.info.label(), r.badge), (2, 3));
         assert_eq!(ipc.take_result(b), Some(Ok(None)));
+    }
+
+    /// Eight threads with eight capability slots each, on real `CapSpace`s.
+    struct TestCaps {
+        s: [[Slot<u32>; 8]; 8],
+    }
+
+    impl TestCaps {
+        fn new() -> Self {
+            Self {
+                s: [[Slot::empty(); 8]; 8],
+            }
+        }
+        fn put(&mut self, t: ThreadId, slot: u32, cap: Capability<u32>) {
+            CapSpace::new(&mut self.s[t.0])
+                .insert_at(CapId(slot), cap)
+                .unwrap();
+        }
+        fn at(&mut self, t: ThreadId, slot: u32) -> Option<Capability<u32>> {
+            CapSpace::new(&mut self.s[t.0]).get(CapId(slot)).ok()
+        }
+        fn del(&mut self, t: ThreadId, slot: u32) {
+            CapSpace::new(&mut self.s[t.0]).delete(CapId(slot)).unwrap();
+        }
+    }
+
+    impl CapAccess for TestCaps {
+        type Obj = u32;
+        fn get(&mut self, t: ThreadId, slot: CapId) -> Result<Capability<u32>, CapError> {
+            CapSpace::new(&mut self.s[t.0]).get(slot)
+        }
+        fn is_empty(&mut self, t: ThreadId, slot: CapId) -> bool {
+            CapSpace::new(&mut self.s[t.0]).get(slot) == Err(CapError::Empty)
+        }
+        fn insert_at(
+            &mut self,
+            t: ThreadId,
+            slot: CapId,
+            cap: Capability<u32>,
+        ) -> Result<(), CapError> {
+            CapSpace::new(&mut self.s[t.0]).insert_at(slot, cap)
+        }
+    }
+
+    const SG: Rights = Rights::SEND.union(Rights::GRANT);
+
+    fn frame() -> Capability<u32> {
+        Capability {
+            object: 77,
+            rights: Rights::READ | Rights::WRITE,
+            badge: 5,
+        }
+    }
+
+    fn with_cap(label: u32) -> Message {
+        Message {
+            info: MessageInfo::new(label, 0, 1),
+            mr: [0; 4],
+        }
+    }
+
+    #[test]
+    fn cap_transfer_copies_rights_and_badge() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        let o = ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(
+            ipc.take_result(T1).unwrap().unwrap().unwrap().info.caps(),
+            1
+        );
+        assert_eq!(c.at(T1, 6), Some(frame()), "same rights and badge");
+        assert_eq!(c.at(T2, 2), Some(frame()), "copied: the sender keeps it");
+    }
+
+    #[test]
+    fn cap_transfer_to_a_receiver_arriving_later() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        let o = ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)));
+        assert_eq!(o.caller, Effect::Block);
+        let o = ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(c.at(T1, 6), Some(frame()));
+        assert_eq!(ipc.take_result(T2), Some(Ok(None)));
+    }
+
+    #[test]
+    fn cap_without_grant_fails_nothing_delivered() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        let o = ipc.send(
+            &mut c,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            with_cap(1),
+            Some(CapId(2)),
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::NoGrant)));
+        assert_eq!(
+            (ep.kind, ep.head),
+            (QueueKind::Receivers, Some(T1)),
+            "the receiver still waits"
+        );
+        assert_eq!(ipc.take_result(T1), None);
+        assert_eq!(c.at(T1, 6), None);
+    }
+
+    #[test]
+    fn plain_send_without_grant_succeeds() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        let o = ipc.send(
+            &mut c,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(3, 0, [0; 4]),
+            None,
+        );
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(
+            ipc.take_result(T1).unwrap().unwrap().unwrap().info.caps(),
+            0
+        );
+        assert_eq!(c.at(T1, 6), None);
+    }
+
+    #[test]
+    fn too_many_caps_fails() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        let two = Message {
+            info: MessageInfo::new(1, 0, 2),
+            mr: [0; 4],
+        };
+        let o = ipc.send(&mut c, &mut ep, T2, SG, 0, two, Some(CapId(2)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::TooManyCaps)));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn empty_source_fails_immediately() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        let o = ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::SourceEmpty)));
+        assert_eq!(ep, EndpointQueue::new(), "the sender is not queued");
+    }
+
+    #[test]
+    fn recv_naming_full_slot_fails() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T1, 6, frame());
+        let o = ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::ReceiveSlotFull)));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn arriving_sender_fails_when_receiver_named_no_slot() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, None);
+        let o = ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::NoReceiveSlot)));
+        assert_eq!((ep.kind, ep.head), (QueueKind::Receivers, Some(T1)));
+    }
+
+    #[test]
+    fn queued_sender_fails_and_receiver_moves_on() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)));
+        ipc.send(
+            &mut c,
+            &mut ep,
+            T3,
+            Rights::SEND,
+            0,
+            msg(2, 0, [0; 4]),
+            None,
+        );
+        let o = ipc.recv(&mut c, &mut ep, T1, Rights::RECV, None);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T2), Some(T3), None, None]);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::NoReceiveSlot)));
+        assert_eq!(
+            ipc.take_result(T1).unwrap().unwrap().unwrap().info.label(),
+            2
+        );
+        assert_eq!(ipc.take_result(T3), Some(Ok(None)));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn receiver_skips_many_failing_senders() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        for t in [T2, T3, T4] {
+            c.put(t, 2, frame());
+            ipc.send(&mut c, &mut ep, t, SG, 0, with_cap(1), Some(CapId(2)));
+        }
+        let t5 = ThreadId(5);
+        ipc.send(
+            &mut c,
+            &mut ep,
+            t5,
+            Rights::SEND,
+            0,
+            msg(5, 0, [0; 4]),
+            None,
+        );
+        let o = ipc.recv(&mut c, &mut ep, T1, Rights::RECV, None);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T2), Some(T3), Some(T4), Some(t5)]);
+        assert_eq!(
+            ipc.take_result(T1).unwrap().unwrap().unwrap().info.label(),
+            5
+        );
+        assert_eq!(
+            ep,
+            EndpointQueue::new(),
+            "no sender is left queued behind a waiting receiver"
+        );
+    }
+
+    #[test]
+    fn receive_slot_filled_meanwhile_fails_sender() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        c.put(T1, 6, frame());
+        let o = ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::ReceiveSlotFull)));
+        assert_eq!((ep.kind, ep.head), (QueueKind::Receivers, Some(T1)));
+        assert_eq!(ipc.take_result(T1), None);
+    }
+
+    #[test]
+    fn source_emptied_while_queued_fails_sender() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        c.put(T2, 2, frame());
+        assert_eq!(
+            ipc.send(&mut c, &mut ep, T2, SG, 0, with_cap(1), Some(CapId(2)))
+                .caller,
+            Effect::Block
+        );
+        c.del(T2, 2);
+        let o = ipc.recv(&mut c, &mut ep, T1, Rights::RECV, Some(CapId(6)));
+        assert_eq!(o.caller, Effect::Block, "nothing left to receive");
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::SourceEmpty)));
+        assert_eq!(c.at(T1, 6), None);
+    }
+
+    #[test]
+    fn reply_with_cap_into_callers_slot() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, None);
+        ipc.call(
+            &mut c,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            Some(CapId(4)),
+        );
+        ipc.take_result(T1);
+        c.put(T1, 3, frame());
+        let o = ipc.reply(&mut c, T1, with_cap(9), Some(CapId(3)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(
+            ipc.take_result(T2).unwrap().unwrap().unwrap().info.caps(),
+            1
+        );
+        assert_eq!(c.at(T2, 4), Some(frame()));
+    }
+
+    #[test]
+    fn reply_with_cap_without_consent_fails_and_keeps_slot() {
+        let (mut ipc, mut ep, mut c) = (Ipc::new(), EndpointQueue::new(), TestCaps::new());
+        ipc.recv(&mut c, &mut ep, T1, Rights::RECV, None);
+        ipc.call(
+            &mut c,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.take_result(T1);
+        c.put(T1, 3, frame());
+        let o = ipc.reply(&mut c, T1, with_cap(9), Some(CapId(3)));
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::NoReceiveSlot)));
+        assert_eq!(ipc.take_result(T2), None, "the caller still waits");
+        let o = ipc.reply(&mut c, T1, msg(9, 0, [0; 4]), None);
+        assert_eq!(
+            woken(&o),
+            [Some(T2), None, None, None],
+            "a plain retry succeeds"
+        );
     }
 
     #[test]
