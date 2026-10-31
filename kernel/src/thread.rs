@@ -19,8 +19,8 @@ use sched::ThreadId;
 use crate::KERNEL_SPACE;
 
 /// Thread slots: boot (0), cooperative workers (1, 2), preemption spinners
-/// (3, 4), IPC demo server and client (5, 6), user demo tasks (7, 8, 9).
-pub const MAX: usize = 10;
+/// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11).
+pub const MAX: usize = 12;
 
 /// Saved contexts, indexed by [`ThreadId`].
 pub static CONTEXTS: [Context; MAX] = [const { Context::new() }; MAX];

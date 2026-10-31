@@ -37,6 +37,8 @@ pub enum MapError {
     AlreadyMapped,
     /// The virtual or physical address was not 4 KiB-aligned.
     Misaligned,
+    /// A user mapping at or above [`USER_TOP`], where user code may never be.
+    NotUserAddress,
 }
 
 /// Why a [`AddressSpace::protect`] call failed.
@@ -48,6 +50,12 @@ pub enum ProtectError {
     /// cannot repermission.
     HugePage,
 }
+
+/// The end of the mappable user range. The last page of the lower half
+/// (`0x7fff_ffff_f000`) is never mapped for user code: a `syscall` in it would
+/// return to the non-canonical `0x8000_0000_0000`, and `sysretq` then faults
+/// in ring 0 on Intel with the user's stack pointer already loaded.
+pub const USER_TOP: u64 = 0x7fff_ffff_f000;
 
 /// A virtual address space: a root PML4 and the HHDM offset used to reach its
 /// tables.
@@ -152,6 +160,9 @@ impl AddressSpace {
     pub fn map(&mut self, virt: u64, phys: u64, flags: PageTableFlags) -> Result<(), MapError> {
         if !page_table::is_page_aligned(virt) || !page_table::is_page_aligned(phys) {
             return Err(MapError::Misaligned);
+        }
+        if flags.contains(PageTableFlags::USER) && virt >= USER_TOP {
+            return Err(MapError::NotUserAddress);
         }
         let idx = table_indices(virt);
         // Intermediate tables must be reachable with at least the leaf's

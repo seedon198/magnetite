@@ -92,6 +92,24 @@ pub fn register_user_fault(handler: UserFaultHandler) {
     USER_FAULT.store(handler as usize as u64, Ordering::Release);
 }
 
+/// Whether exception `vector` is one user code can cause, and so, raised in
+/// ring 3, ends the thread: #DE, #DB, #BP, #OF, #BR, #UD, #NM, #TS, #NP, #SS,
+/// #GP, #PF, #MF, #AC, #XM, #VE and #CP. Never NMI (2), #DF (8) or #MC (18).
+#[must_use]
+pub const fn user_fault_vector(vector: u64) -> bool {
+    matches!(vector, 0 | 1 | 3..=7 | 10..=17 | 19..=21)
+}
+
+// The exceptions user code can cause are routed to the user-fault handler;
+// NMI (2), #DF (8) and #MC (18) never are, even when they land in ring 3:
+// they are not the thread's fault, and a #DF's saved CS is undefined.
+const _: () = {
+    assert!(user_fault_vector(14) && user_fault_vector(13) && user_fault_vector(6));
+    assert!(user_fault_vector(0) && user_fault_vector(3));
+    assert!(!user_fault_vector(2) && !user_fault_vector(8) && !user_fault_vector(18));
+    assert!(!user_fault_vector(32) && !user_fault_vector(0x30));
+};
+
 /// The faulting linear address of the last page fault (`CR2`).
 #[must_use]
 pub fn fault_address() -> u64 {
@@ -108,7 +126,7 @@ extern "C" fn idt_dispatch(frame: &mut TrapFrame) {
     // A CPU exception raised in ring 3 with no specific handler ends the user
     // thread, not the kernel. Keyed on the trap frame's CS, never on which
     // thread is current, so a kernel-mode fault is always fatal.
-    if slot == 0 && frame.vector < 32 && frame.cs & 3 == 3 {
+    if slot == 0 && user_fault_vector(frame.vector) && frame.cs & 3 == 3 {
         let user = USER_FAULT.load(Ordering::Acquire);
         if user != 0 {
             // SAFETY: `user` is non-zero only because `register_user_fault`

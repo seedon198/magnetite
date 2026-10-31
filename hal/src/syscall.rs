@@ -27,8 +27,11 @@ const EFER_SCE: u64 = 1 << 0;
 /// `STAR`: `syscall` loads kernel CS 0x08 / SS 0x10; the sysret base 0x18 yields
 /// user CS 0x28|3 and SS 0x20|3 (the GDT in `hal::gdt` is ordered for this).
 const STAR_VALUE: u64 = (0x08u64 << 32) | (0x18u64 << 48);
-/// Clear on syscall entry: IF (no interrupts in the stub), TF, DF, AC.
-const FMASK_VALUE: u64 = 0x200 | 0x100 | 0x400 | 0x4_0000;
+/// Clear on syscall entry: IF (no interrupts in the stub), TF, DF, AC and NT.
+/// User code can set NT with `popfq`; `syscall` would carry it into the
+/// kernel, the context switch does not save RFLAGS, and a later `iretq` with NT
+/// set faults in ring 0. Linux masks NT for the same reason.
+const FMASK_VALUE: u64 = 0x200 | 0x100 | 0x400 | 0x4_0000 | 0x4000;
 
 /// Raw system-call arguments, as the entry stub lays them out.
 #[repr(C)]
@@ -170,6 +173,15 @@ global_asm!(
     "    push rax",                                // number  -> rsp = &SyscallArgs
     "    mov rdi, rsp",
     "    call syscall_dispatch",
+    // Reload the argument registers from SyscallArgs, so whatever the Rust
+    // handler left in caller-saved registers never reaches ring 3. (rbx, rbp
+    // and r12 to r15 are callee-saved: the call preserved the user's values.)
+    "    mov rdi, [rsp + 8]",
+    "    mov rsi, [rsp + 16]",
+    "    mov rdx, [rsp + 24]",
+    "    mov r8,  [rsp + 32]",
+    "    mov r9,  [rsp + 40]",
+    "    mov r10, [rsp + 48]",
     "    add rsp, 56", // pop the seven SyscallArgs words (rax holds status)
     "    pop r11",
     "    pop rcx",
@@ -193,9 +205,17 @@ global_asm!(
     "    push 0x202",          // RFLAGS (IF set)
     "    push 0x2b",           // user CS
     "    push rax",            // user RIP
+    // Clear every register that is not an input: the kernel trampoline left
+    // kernel addresses in them (r12 holds the entry point, rbp a kernel stack
+    // address), which would hand ring 3 the KASLR slide.
     "    xor eax, eax",
     "    xor ebx, ebx",
     "    xor ecx, ecx",
+    "    xor ebp, ebp",
     "    xor r11d, r11d",
+    "    xor r12d, r12d",
+    "    xor r13d, r13d",
+    "    xor r14d, r14d",
+    "    xor r15d, r15d",
     "    iretq",
 );

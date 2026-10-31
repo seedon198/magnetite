@@ -327,6 +327,23 @@ fn init_paging(boot_info: &BootInfo) {
         ok
     });
     assert!(isolated, "paging: user space isolation self-test failed");
+    // The top user page is never mappable: a `syscall` there would return to a
+    // non-canonical address, and `sysretq` faults in ring 0 on Intel with the
+    // user's stack pointer already loaded.
+    let top_refused = AddressSpace::new_user(kernel).is_some_and(|mut user| {
+        let Some(frame) = hal::frame::alloc_frame() else {
+            return false;
+        };
+        let refused = user
+            .map(hal::paging::USER_TOP, frame.addr(), Flags::USER)
+            .is_err();
+        hal::frame::free_frame(frame);
+        refused
+    });
+    assert!(
+        top_refused,
+        "paging: the last user page must not be mappable"
+    );
     info!("paging: user space isolated (lower half private, kernel half shared)");
 }
 

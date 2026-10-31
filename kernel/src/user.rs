@@ -22,21 +22,29 @@ use crate::{KERNEL_SPACE, SCHED};
 const USER_CODE_VA: u64 = 0x40_0000;
 const USER_STACK_VA: u64 = 0x7fff_f000;
 
-/// Syscall numbers PR 1 understands (the full ABI is PR 2).
+/// Syscall numbers PR 1 understands (the full ABI is PR 2). `report` and
+/// `yield` exist for the demo's regression checks.
 const SYS_HELLO: u64 = 1;
+const SYS_REPORT: u64 = 2;
+const SYS_YIELD: u64 = 6;
 const SYS_EXIT: u64 = 7;
 
 /// Each user thread's first message register, handed to it in `rdx`.
 static MR0: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
+/// How far below the top of its stack page each user thread starts.
+static RSP_OFFSET: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
+/// Values user threads reported with `report`, OR-ed together per thread.
+static REPORT: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
 
 /// User demo threads that exited or were killed.
 static DONE: AtomicU64 = AtomicU64::new(0);
 
 /// Create user thread `t`: a fresh address space holding `code` (read and
 /// execute) and a one-page stack (read and write, never execute), its own
-/// kernel stack from window slot `stack_slot`, and `mr0` for its `rdx`.
-/// Admits it to the run queue. Returns `false` if memory ran out.
-pub fn spawn_user(t: ThreadId, stack_slot: usize, code: &[u8], mr0: u64) -> bool {
+/// kernel stack from window slot `stack_slot`, `mr0` for its `rdx`, and its
+/// stack pointer `rsp_offset` bytes below the top of its stack page. Admits it
+/// to the run queue. Returns `false` if memory ran out.
+pub fn spawn_user(t: ThreadId, stack_slot: usize, code: &[u8], mr0: u64, rsp_offset: u64) -> bool {
     assert!(code.len() <= PAGE as usize, "user: stub larger than a page");
     let Some(mut space) = hal::cpu::without_interrupts(|| {
         KERNEL_SPACE
@@ -70,6 +78,7 @@ pub fn spawn_user(t: ThreadId, stack_slot: usize, code: &[u8], mr0: u64) -> bool
         return false;
     }
     MR0[t.0].store(mr0, Ordering::Relaxed);
+    RSP_OFFSET[t.0].store(rsp_offset, Ordering::Relaxed);
     thread::set_kernel_stack(t, kstack);
     thread::set_address_space(t, space);
     CONTEXTS[t.0].init(kstack, user_entry);
@@ -83,7 +92,7 @@ extern "C" fn user_entry() -> ! {
         hal::cpu::without_interrupts(|| SCHED.lock().current()).expect("user: a running thread");
     let entry = UserEntry {
         rip: USER_CODE_VA,
-        rsp: USER_STACK_VA + PAGE,
+        rsp: USER_STACK_VA + PAGE - RSP_OFFSET[t.0].load(Ordering::Relaxed),
         cap: 0,
         msg_info: 0,
         mr: [MR0[t.0].load(Ordering::Relaxed), 0, 0, 0],
@@ -101,6 +110,16 @@ fn syscall(args: &SyscallArgs) -> u64 {
                 t.0,
                 args.mr[0]
             );
+            0
+        }
+        SYS_REPORT => {
+            REPORT[t.0].fetch_or(args.mr[0], Ordering::Relaxed);
+            0
+        }
+        SYS_YIELD => {
+            // Block inside the kernel while other threads enter and leave
+            // their own syscalls: each must come back to its own user stack.
+            crate::yield_now();
             0
         }
         SYS_EXIT => {
@@ -126,15 +145,38 @@ fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
     crate::exit_current()
 }
 
-/// Prove the mechanism: two user threads say hello from ring 3, spin long
-/// enough to be preempted there, and exit; a third reads kernel memory and is
-/// killed. The kernel half is supervisor-only, so that read must fault.
+/// Prove the mechanism, and pin the failure modes a review found:
+///
+/// - threads 7 and 8 say hello, block inside the kernel (`yield`) across each
+///   other's syscalls, report the user stack pointer they came back with, spin
+///   long enough to be preempted in ring 3, and exit;
+/// - thread 9 reads kernel memory and is killed;
+/// - thread 10 reports every register at ring-3 entry and after a syscall: no
+///   kernel value may reach ring 3, so both reports are zero;
+/// - thread 11 sets `RFLAGS.NT` and exits: the flag must not leak into the
+///   kernel, where a later `iretq` would fault in ring 0.
 pub fn demo(boot_info: &BootInfo, preemptive: bool) {
-    // mov eax,1; syscall; mov r12d,0x2000000; dec r12d; jnz -5; mov eax,7;
-    // syscall; jmp $
-    const HELLO_SPIN_EXIT: [u8; 27] = [
-        0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05, 0x41, 0xBC, 0x00, 0x00, 0x00, 0x02, 0x41, 0xFF,
-        0xCC, 0x75, 0xFB, 0xB8, 0x07, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xEB, 0xFE,
+    // hello; yield; report rsp; spin 0x2000000; exit
+    const YIELD_REPORT: [u8; 44] = [
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x06, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48,
+        0x89, 0xe2, 0xb8, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x41, 0xbc, 0x00, 0x00, 0x00, 0x02,
+        0x41, 0xff, 0xcc, 0x75, 0xfb, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
+    ];
+    // rax = OR of all registers at entry; report; rax = OR of rdi, rsi, r8 to
+    // r10, rbx, rbp, r12 to r15 after the syscall; report; exit
+    const LEAK: [u8; 104] = [
+        0x48, 0x89, 0xe8, 0x48, 0x09, 0xd8, 0x48, 0x09, 0xc8, 0x48, 0x09, 0xd0, 0x48, 0x09, 0xf0,
+        0x48, 0x09, 0xf8, 0x4c, 0x09, 0xc0, 0x4c, 0x09, 0xc8, 0x4c, 0x09, 0xd0, 0x4c, 0x09, 0xd8,
+        0x4c, 0x09, 0xe0, 0x4c, 0x09, 0xe8, 0x4c, 0x09, 0xf0, 0x4c, 0x09, 0xf8, 0x48, 0x89, 0xc2,
+        0xb8, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x89, 0xf8, 0x48, 0x09, 0xf0, 0x4c, 0x09,
+        0xc0, 0x4c, 0x09, 0xc8, 0x4c, 0x09, 0xd0, 0x48, 0x09, 0xd8, 0x48, 0x09, 0xe8, 0x4c, 0x09,
+        0xe0, 0x4c, 0x09, 0xe8, 0x4c, 0x09, 0xf0, 0x4c, 0x09, 0xf8, 0x48, 0x89, 0xc2, 0xb8, 0x02,
+        0x00, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
+    ];
+    // pushfq; or qword [rsp], 0x4000 (NT); popfq; exit
+    const SET_NT_EXIT: [u8; 19] = [
+        0x9c, 0x48, 0x81, 0x0c, 0x24, 0x00, 0x40, 0x00, 0x00, 0x9d, 0xb8, 0x07, 0x00, 0x00, 0x00,
+        0x0f, 0x05, 0xeb, 0xfe,
     ];
     // movabs rax, [hhdm]; jmp $
     let mut fault = [0u8; 12];
@@ -146,15 +188,28 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     hal::syscall::register(syscall);
     hal::idt::register_user_fault(user_fault);
 
-    let spawned = spawn_user(ThreadId(7), 1, &HELLO_SPIN_EXIT, 0xA1)
-        && spawn_user(ThreadId(8), 2, &HELLO_SPIN_EXIT, 0xA2)
-        && spawn_user(ThreadId(9), 3, &fault, 0);
+    let spawned = spawn_user(ThreadId(7), 1, &YIELD_REPORT, 0xA1, 0)
+        && spawn_user(ThreadId(8), 2, &YIELD_REPORT, 0xA2, 64)
+        && spawn_user(ThreadId(9), 3, &fault, 0, 0)
+        && spawn_user(ThreadId(10), 4, &LEAK, 0, 0)
+        && spawn_user(ThreadId(11), 5, &SET_NT_EXIT, 0, 0);
     assert!(spawned, "user: could not create the demo threads");
 
-    while DONE.load(Ordering::Acquire) < 3 {
+    while DONE.load(Ordering::Acquire) < 5 {
         crate::yield_now();
     }
 
+    let top = USER_STACK_VA + PAGE;
+    let (rsp7, rsp8) = (
+        REPORT[7].load(Ordering::Relaxed),
+        REPORT[8].load(Ordering::Relaxed),
+    );
+    assert!(
+        rsp7 == top && rsp8 == top - 64,
+        "user: a thread came back from a blocking syscall on the wrong stack ({rsp7:#x}, {rsp8:#x})"
+    );
+    let leaked = REPORT[10].load(Ordering::Relaxed);
+    assert_eq!(leaked, 0, "user: kernel register values reached ring 3");
     let n = thread::USER_PREEMPTIONS.load(Ordering::Relaxed);
     assert!(!preemptive || n > 0, "user: ring 3 was never preempted");
     let kernel_maps = hal::cpu::without_interrupts(|| {
@@ -172,6 +227,7 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         "user: code not in the task's space"
     );
     crate::info!(
-        "user: two tasks preempted in ring 3 ({n} times) and exited; a kernel read from ring 3 was contained"
+        "user: two tasks blocked inside syscalls and came back on their own stacks, were preempted in ring 3 ({n} times) and exited"
     );
+    crate::info!("user: no kernel register reached ring 3; RFLAGS.NT did not leak; a kernel read from ring 3 was contained");
 }
