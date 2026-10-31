@@ -81,6 +81,10 @@ enum State {
     // Read once capability transfer lands (Task 4 of the #81 plan).
     #[allow(dead_code)]
     Receiving { slot: Option<CapId> },
+    /// Made a `Call` that a receiver took; waiting for its reply. `slot` is
+    /// where a capability carried by the reply may land.
+    #[allow(dead_code)]
+    AwaitingReply { slot: Option<CapId> },
 }
 
 /// A message on its way: everything a queued sender needs to complete later.
@@ -88,6 +92,8 @@ enum State {
 struct Pending {
     msg: Message,
     badge: u64,
+    /// `Some(reply_slot)` for a `Call`: the sender then awaits a reply.
+    call: Option<Option<CapId>>,
 }
 
 /// One thread's IPC state.
@@ -96,6 +102,8 @@ struct Tcb {
     state: State,
     /// The next thread in the endpoint queue this thread is on.
     next: Option<ThreadId>,
+    /// The one-shot reply slot: the caller whose `Call` this thread took.
+    reply_to: Option<ThreadId>,
     /// The result of this thread's last operation, until it is taken.
     result: Option<Result<Option<Received>, IpcError>>,
 }
@@ -104,6 +112,7 @@ impl Tcb {
     const IDLE: Self = Self {
         state: State::Idle,
         next: None,
+        reply_to: None,
         result: None,
     };
 }
@@ -119,6 +128,9 @@ impl Default for Ipc {
     }
 }
 
+// The operations take the invocation's parts as plain arguments, matching the
+// register ABI one to one; bundling them would only rename them.
+#[allow(clippy::too_many_arguments)]
 impl Ipc {
     /// No thread is blocked and no result is pending.
     #[must_use]
@@ -136,42 +148,41 @@ impl Ipc {
 
     /// Send `msg` through an endpoint capability with `ep_rights` and
     /// `ep_badge`. Blocks until a receiver takes it.
-    // The operations take the invocation's parts as plain arguments, matching
-    // the register ABI one to one; bundling them would only rename them.
-    #[allow(clippy::too_many_arguments)]
     pub fn send<C: CapAccess>(
         &mut self,
-        _caps: &mut C,
+        caps: &mut C,
         ep: &mut EndpointQueue,
         me: ThreadId,
         ep_rights: Rights,
         ep_badge: u64,
         msg: Message,
-        _cap: Option<CapId>,
+        cap: Option<CapId>,
     ) -> Outcome {
-        if !ep_rights.contains(Rights::SEND) {
-            return self.fail(me, IpcError::MissingRight);
-        }
-        let pending = Pending {
-            msg,
-            badge: ep_badge,
-        };
-        if ep.kind == QueueKind::Receivers {
-            let r = self.dequeue(ep).expect("ipc: receivers queue has a head");
-            let mut out = Outcome::new(Effect::Done);
-            self.complete(pending, r);
-            self.t[me.0].result = Some(Ok(None));
-            out.push(r);
-            out
-        } else {
-            self.enqueue(ep, me, QueueKind::Senders, State::Sending(pending));
-            Outcome::new(Effect::Block)
-        }
+        self.send_inner(caps, ep, me, ep_rights, ep_badge, msg, cap, None)
+    }
+
+    /// Send `msg` like [`send`](Self::send), then wait for the reply as one
+    /// step. The receiver that takes it holds this thread in its reply slot.
+    /// `reply_recv_slot` is where a capability carried by the reply may land.
+    pub fn call<C: CapAccess>(
+        &mut self,
+        caps: &mut C,
+        ep: &mut EndpointQueue,
+        me: ThreadId,
+        ep_rights: Rights,
+        ep_badge: u64,
+        msg: Message,
+        cap: Option<CapId>,
+        reply_recv_slot: Option<CapId>,
+    ) -> Outcome {
+        let call = Some(reply_recv_slot);
+        self.send_inner(caps, ep, me, ep_rights, ep_badge, msg, cap, call)
     }
 
     /// Receive through an endpoint capability with `ep_rights`, blocking
     /// until a sender arrives. `recv_slot` is where an incoming capability may
-    /// land.
+    /// land. Fails with `ReplySlotFull` while a caller awaits this thread's
+    /// reply.
     pub fn recv<C: CapAccess>(
         &mut self,
         _caps: &mut C,
@@ -183,30 +194,144 @@ impl Ipc {
         if !ep_rights.contains(Rights::RECV) {
             return self.fail(me, IpcError::MissingRight);
         }
+        if self.t[me.0].reply_to.is_some() {
+            return self.fail(me, IpcError::ReplySlotFull);
+        }
+        self.recv_unchecked(ep, me, recv_slot, Outcome::new(Effect::Done))
+    }
+
+    /// Answer the thread in `me`'s reply slot with `msg`, waking it and
+    /// emptying the slot. Fails with `NoReplySlot` if the slot is empty.
+    pub fn reply<C: CapAccess>(
+        &mut self,
+        _caps: &mut C,
+        me: ThreadId,
+        msg: Message,
+        _cap: Option<CapId>,
+    ) -> Outcome {
+        let Some(caller) = self.t[me.0].reply_to.take() else {
+            return self.fail(me, IpcError::NoReplySlot);
+        };
+        let reply = Pending {
+            msg,
+            badge: 0,
+            call: None,
+        };
+        self.deliver(reply, caller);
+        self.t[me.0].result = Some(Ok(None));
+        let mut out = Outcome::new(Effect::Done);
+        out.push(caller);
+        out
+    }
+
+    /// `Reply` (if the reply slot holds a caller), then `Recv`, as one
+    /// operation: a server's loop. With an empty reply slot it just receives.
+    /// If the reply fails, the receive does not run.
+    pub fn reply_recv<C: CapAccess>(
+        &mut self,
+        caps: &mut C,
+        ep: &mut EndpointQueue,
+        me: ThreadId,
+        ep_rights: Rights,
+        msg: Message,
+        cap: Option<CapId>,
+        recv_slot: Option<CapId>,
+    ) -> Outcome {
+        if !ep_rights.contains(Rights::RECV) {
+            return self.fail(me, IpcError::MissingRight);
+        }
+        let mut out = Outcome::new(Effect::Done);
+        if self.t[me.0].reply_to.is_some() {
+            out = self.reply(caps, me, msg, cap);
+            if let Some(Err(_)) = self.t[me.0].result {
+                return out;
+            }
+            self.t[me.0].result = None;
+        }
+        self.recv_unchecked(ep, me, recv_slot, out)
+    }
+
+    fn send_inner<C: CapAccess>(
+        &mut self,
+        _caps: &mut C,
+        ep: &mut EndpointQueue,
+        me: ThreadId,
+        ep_rights: Rights,
+        ep_badge: u64,
+        msg: Message,
+        _cap: Option<CapId>,
+        call: Option<Option<CapId>>,
+    ) -> Outcome {
+        if !ep_rights.contains(Rights::SEND) {
+            return self.fail(me, IpcError::MissingRight);
+        }
+        let pending = Pending {
+            msg,
+            badge: ep_badge,
+            call,
+        };
+        if ep.kind == QueueKind::Receivers {
+            let r = self.dequeue(ep).expect("ipc: receivers queue has a head");
+            let mut out = Outcome::new(Effect::Done);
+            out.push(r);
+            if !self.complete(pending, me, r) {
+                out.caller = Effect::Block;
+            }
+            out
+        } else {
+            self.enqueue(ep, me, QueueKind::Senders, State::Sending(pending));
+            Outcome::new(Effect::Block)
+        }
+    }
+
+    /// The receive half, after its checks: take the first queued sender, or
+    /// block. `out` carries wakes from an earlier half of the operation.
+    fn recv_unchecked(
+        &mut self,
+        ep: &mut EndpointQueue,
+        me: ThreadId,
+        recv_slot: Option<CapId>,
+        mut out: Outcome,
+    ) -> Outcome {
         if ep.kind == QueueKind::Senders {
             let s = self.dequeue(ep).expect("ipc: senders queue has a head");
             let State::Sending(pending) = self.t[s.0].state else {
                 unreachable!("ipc: a queued sender is in the Sending state");
             };
-            self.t[s.0].state = State::Idle;
-            self.t[s.0].result = Some(Ok(None));
-            self.complete(pending, me);
-            let mut out = Outcome::new(Effect::Done);
-            out.push(s);
-            out
+            if self.complete(pending, s, me) {
+                out.push(s);
+            }
+            out.caller = Effect::Done;
         } else {
-            self.enqueue(
-                ep,
-                me,
-                QueueKind::Receivers,
-                State::Receiving { slot: recv_slot },
-            );
-            Outcome::new(Effect::Block)
+            let state = State::Receiving { slot: recv_slot };
+            self.enqueue(ep, me, QueueKind::Receivers, state);
+            out.caller = Effect::Block;
+        }
+        out
+    }
+
+    /// Complete a rendezvous of sender `s` and receiver `r`: deliver the
+    /// message, then settle the sender. A `Call` sender moves to awaiting its
+    /// reply and fills `r`'s reply slot; any other sender is done. Returns
+    /// whether the sender may run (it then has its result).
+    fn complete(&mut self, p: Pending, s: ThreadId, r: ThreadId) -> bool {
+        self.deliver(p, r);
+        match p.call {
+            Some(slot) => {
+                self.t[s.0].state = State::AwaitingReply { slot };
+                self.t[r.0].reply_to = Some(s);
+                false
+            }
+            None => {
+                self.t[s.0].state = State::Idle;
+                self.t[s.0].result = Some(Ok(None));
+                true
+            }
         }
     }
 
-    /// Deliver `p` to receiver `r`: only `length` registers, the rest zero.
-    fn complete(&mut self, p: Pending, r: ThreadId) {
+    /// Deliver `p` to `r`: only `length` registers, the rest zero.
+    fn deliver(&mut self, p: Pending, r: ThreadId) {
         let len = usize::from(p.msg.info.length());
         let mut mr = [0; MSG_REGISTERS];
         mr[..len].copy_from_slice(&p.msg.mr[..len]);
