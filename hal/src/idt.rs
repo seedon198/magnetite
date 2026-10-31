@@ -130,7 +130,8 @@ extern "C" fn idt_dispatch(frame: &mut TrapFrame) {
 }
 
 /// Human-readable name for a CPU exception vector.
-fn exception_name(vector: u64) -> &'static str {
+#[must_use]
+pub fn exception_name(vector: u64) -> &'static str {
     match vector {
         0 => "#DE divide error",
         1 => "#DB debug",

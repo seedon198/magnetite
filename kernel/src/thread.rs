@@ -74,22 +74,16 @@ pub fn alloc_kernel_stack(slot: usize) -> Option<u64> {
 }
 
 /// Give thread `t` its own kernel stack, used for every ring-3 entry.
-// Used by the user-thread demo (Task 4 of the #82 PR 1 plan).
-#[allow(dead_code)]
 pub fn set_kernel_stack(t: ThreadId, top: u64) {
     KSTACK_TOP[t.0].store(top, Ordering::Relaxed);
 }
 
 /// Give thread `t` its own address space.
-// Used by the user-thread demo (Task 4 of the #82 PR 1 plan).
-#[allow(dead_code)]
 pub fn set_address_space(t: ThreadId, space: AddressSpace) {
     hal::cpu::without_interrupts(|| SPACES.lock()[t.0] = Some(space));
 }
 
 /// Whether thread `t`'s own address space maps `virt`.
-// Used by the user-thread demo (Task 4 of the #82 PR 1 plan).
-#[allow(dead_code)]
 pub fn user_maps(t: ThreadId, virt: u64) -> bool {
     hal::cpu::without_interrupts(|| {
         SPACES.lock()[t.0]

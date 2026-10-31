@@ -37,6 +37,11 @@ static CSPACES: SpinLock<[Option<CapSpace<'static, ObjectRef>>; ::ipc::MAX_THREA
 /// The HHDM offset, for reaching endpoint state.
 static HHDM: AtomicU64 = AtomicU64::new(0);
 
+/// The HHDM offset recorded at IPC set-up.
+pub fn hhdm() -> u64 {
+    HHDM.load(Ordering::Relaxed)
+}
+
 /// Give thread `t` its capability space.
 pub fn set_cspace(t: ThreadId, space: CapSpace<'static, ObjectRef>) {
     hal::cpu::without_interrupts(|| CSPACES.lock()[t.0] = Some(space));

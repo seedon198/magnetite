@@ -2,7 +2,7 @@
 //!
 //! Uses the `syscall`/`sysret` fast path: [`init`] programs the MSRs
 //! (`EFER.SCE`, `STAR`, `LSTAR`, `FMASK`), [`syscall_entry`] is the kernel entry
-//! stub, and [`enter_user`] drops to ring 3 for the first time via `iretq`. The
+//! stub, and [`enter_user_once`] drops to ring 3 via `iretq`. The
 //! message-register ABI is [`capability::abi`]: `rdi` = invoked capability id,
 //! `rsi` = packed `MessageInfo`, `rdx`/`r8`/`r9`/`r10` = message registers 0-3
 //! (`rcx`/`r11` are reserved by the CPU for the return RIP/RFLAGS); `rax`
@@ -110,19 +110,6 @@ pub fn init() {
     }
 }
 
-/// Drop to ring 3 for the first time, saving the current (kernel) context into
-/// `save_rsp_to` so a later [`crate::context::resume`] of it returns here.
-///
-/// The caller provides a valid user code/stack mapping in `entry`; returns when
-/// something resumes the saved context.
-pub fn enter_user(save: &crate::context::Context, entry: &UserEntry) {
-    // SAFETY: `save` provides a writable slot for the saved stack pointer, and
-    // `entry` describes a mapped, user-accessible code page and stack. The asm
-    // saves our callee-saved frame and `iretq`s to ring 3; control returns here
-    // when the saved context is `resume`d.
-    unsafe { enter_user_asm(save.save_ptr(), entry as *const UserEntry) }
-}
-
 /// Drop to ring 3 for good with `entry`'s registers, saving nothing. A user
 /// thread's kernel trampoline calls this once; the thread then lives in ring 3
 /// and returns to the kernel only through syscalls and interrupts.
@@ -150,7 +137,6 @@ extern "C" fn syscall_dispatch(args: *const SyscallArgs) -> u64 {
 
 extern "C" {
     fn syscall_entry();
-    fn enter_user_asm(save_rsp_to: *mut u64, entry: *const UserEntry);
     fn enter_user_once_asm(entry: *const UserEntry) -> !;
 }
 
@@ -163,9 +149,9 @@ extern "C" {
 // mr0..3; rax = status out. Ten words are pushed, keeping rsp 16-byte aligned for
 // the call.
 //
-// enter_user_asm saves the current callee-saved frame (so `resume` can return
-// here) and `iretq`s to ring 3 with the message registers loaded. User
-// selectors: CS 0x2b, SS 0x23 (see hal::gdt).
+// enter_user_once_asm `iretq`s to ring 3 for good with the message registers
+// loaded and the scratch registers cleared. User selectors: CS 0x2b, SS 0x23
+// (see hal::gdt).
 global_asm!(
     ".global syscall_entry",
     ".p2align 4",
@@ -189,32 +175,6 @@ global_asm!(
     "    pop rcx",
     "    pop rsp", // user RSP
     "    sysretq",
-    //
-    ".global enter_user_asm",
-    ".p2align 4",
-    "enter_user_asm:",
-    "    push rbp",
-    "    push rbx",
-    "    push r12",
-    "    push r13",
-    "    push r14",
-    "    push r15",
-    "    mov [rdi], rsp",      // save boot context
-    "    mov r11, rsi",        // UserEntry*
-    "    mov rax, [r11 + 0]",  // rip
-    "    mov rbx, [r11 + 8]",  // rsp
-    "    mov rdi, [r11 + 16]", // cap
-    "    mov rsi, [r11 + 24]", // msg_info
-    "    mov rdx, [r11 + 32]", // mr0
-    "    mov r8,  [r11 + 40]", // mr1
-    "    mov r9,  [r11 + 48]", // mr2
-    "    mov r10, [r11 + 56]", // mr3
-    "    push 0x23",           // user SS
-    "    push rbx",            // user RSP
-    "    push 0x202",          // RFLAGS (IF set)
-    "    push 0x2b",           // user CS
-    "    push rax",            // user RIP
-    "    iretq",
     //
     ".global enter_user_once_asm",
     ".p2align 4",
