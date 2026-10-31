@@ -44,13 +44,14 @@ jobs:
           --target x86_64-unknown-none
           -- -D warnings
 
-      # Host crates and host-side tests (xtask, and boot-info's unit tests,
-      # which run on the host).
+      # Host crates and their unit tests: the workspace default members (xtask
+      # and every pure libs/* crate). `cargo xtask test` runs `cargo test` over
+      # the same set.
       - name: clippy (host)
-        run: cargo clippy -p xtask -p boot-info --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Host unit tests
-        run: cargo test -p boot-info
+        run: cargo xtask test
 
       - name: Build kernel
         run: cargo xtask build
