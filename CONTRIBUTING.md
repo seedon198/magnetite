@@ -53,6 +53,8 @@ not be merged. In `hal`, every `unsafe` block needs a `// SAFETY:` comment.
    - the kernel boots: `cargo xtask run`
    - `scripts/check-unsafe.sh` and `scripts/check-dashes.sh`
 4. Open a PR referencing the issue (`Closes #12`) and fill in the template.
+   If the PR completes a roadmap item, tick it in [`docs/roadmap.md`](docs/roadmap.md)
+   in the same PR.
 5. Squash-merge after review and green CI.
 
 ## Labels

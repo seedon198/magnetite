@@ -26,3 +26,4 @@ Closes #
 - [ ] Threat model updated (if security-relevant)
 - [ ] ADR added for significant design decisions (or not needed)
 - [ ] `CHANGELOG.md` updated under *Unreleased*
+- [ ] `docs/roadmap.md` updated if this completes a roadmap item or milestone
