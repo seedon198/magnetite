@@ -144,6 +144,7 @@ cargo xtask run        # build the ISO and boot it in QEMU (serial on your termi
 
 | Command | Does |
 |---|---|
+| `cargo xtask test` | Run host tests for the workspace default members |
 | `cargo xtask run` | Build and boot in QEMU (UEFI); `--bios` for legacy boot, `--kvm` on Linux |
 | `cargo xtask debug` | Boot paused with a GDB stub |
 | `cargo test` | Run the host unit tests for the pure crates |
