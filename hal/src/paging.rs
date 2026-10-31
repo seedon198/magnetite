@@ -79,6 +79,59 @@ impl AddressSpace {
         Some(Self { root, hhdm })
     }
 
+    /// Build a user address space: a fresh PML4 whose kernel half (entries
+    /// 256 to 511) is copied from `kernel`'s root, and whose user half is
+    /// empty. Returns `None` if no frame is free.
+    ///
+    /// The copied entries point at the kernel's own lower-level tables, so the
+    /// kernel half stays shared as long as the kernel never adds a top-level
+    /// entry later; [`populate_higher_half`](Self::populate_higher_half) on the
+    /// kernel space guarantees that.
+    pub fn new_user(kernel: &AddressSpace) -> Option<Self> {
+        let root = frame::alloc_frame()?; // zeroed by the allocator
+        let hhdm = kernel.hhdm;
+        for i in HIGHER_HALF_START..ENTRY_COUNT {
+            let e = kernel.entry(kernel.root.addr(), i);
+            debug_assert!(e.is_present(), "paging: kernel half not populated");
+            let dst = ((hhdm + root.addr()) as *mut u64).wrapping_add(i);
+            // SAFETY: `root` is a freshly allocated, zeroed 4 KiB frame we
+            // exclusively own, mapped in the HHDM; `i < 512` keeps the write
+            // in bounds and aligned.
+            unsafe { dst.write_volatile(e.bits()) }
+        }
+        Some(Self { root, hhdm })
+    }
+
+    /// Give every empty kernel-half top-level entry (256 to 511) a fresh,
+    /// zeroed table, present and writable but not user-accessible. Call once
+    /// on the kernel space before creating any user space, so that every
+    /// later kernel mapping lands in tables all address spaces share. Returns
+    /// `false` if frames ran out.
+    pub fn populate_higher_half(&mut self) -> bool {
+        for i in HIGHER_HALF_START..ENTRY_COUNT {
+            if self.entry(self.root.addr(), i).is_present() {
+                continue;
+            }
+            let Some(table) = frame::alloc_frame() else {
+                return false;
+            };
+            let e = PageTableEntry::new(
+                table.addr(),
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            );
+            // SAFETY: in-bounds entry of our own PML4, reached via the HHDM;
+            // it was empty, and `table` is a fresh zeroed frame we own.
+            unsafe { self.entry_ptr(self.root.addr(), i).write_volatile(e.bits()) }
+        }
+        true
+    }
+
+    /// The physical address of this space's root table, to tell spaces apart.
+    #[must_use]
+    pub fn root_phys(&self) -> u64 {
+        self.root.addr()
+    }
+
     /// Install this address space in `CR3`, making its mappings active.
     ///
     /// Sound because every `AddressSpace` maps the kernel higher half by

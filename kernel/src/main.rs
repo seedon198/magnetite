@@ -303,6 +303,35 @@ fn init_paging(boot_info: &BootInfo) {
     } else {
         warn!("paging: self-test FAILED");
     }
+
+    // User address spaces (#82, ADR 0019) copy the kernel half's top-level
+    // entries, so every one must exist before the first user space: anything
+    // the kernel maps later then lands in tables all spaces share.
+    let mut guard = KERNEL_SPACE.lock();
+    let Some(kernel) = guard.as_mut() else { return };
+    assert!(
+        kernel.populate_higher_half(),
+        "paging: out of frames populating the kernel half"
+    );
+    let probe = core::ptr::addr_of!(HEAP) as u64;
+    let isolated = AddressSpace::new_user(kernel).is_some_and(|mut user| {
+        let Some(frame) = hal::frame::alloc_frame() else {
+            return false;
+        };
+        const VA: u64 = 0x4000_0000;
+        let ok = user
+            .map(VA, frame.addr(), Flags::USER | Flags::NO_EXECUTE)
+            .is_ok()
+            && user.translate(VA) == Some(frame.addr())
+            && kernel.translate(VA).is_none()
+            && user.translate(probe).is_some()
+            && user.translate(probe) == kernel.translate(probe);
+        user.unmap(VA);
+        hal::frame::free_frame(frame);
+        ok
+    });
+    assert!(isolated, "paging: user space isolation self-test failed");
+    info!("paging: user space isolated (lower half private, kernel half shared)");
 }
 
 /// Enforce W^X + NX: enable NX, set per-section kernel-image permissions
@@ -1000,7 +1029,9 @@ fn init_preemption() -> bool {
             warn!("lapic: no address space");
             return false;
         };
-        if aspace.top_level_flags(LAPIC_MMIO_VA).is_some() {
+        // The window's top-level table exists for every kernel slot (see
+        // `populate_higher_half`), so check the page itself is unused.
+        if aspace.translate(LAPIC_MMIO_VA).is_some() {
             warn!("lapic: MMIO window {LAPIC_MMIO_VA:#x} is already in use");
             return false;
         }
