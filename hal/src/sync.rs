@@ -8,7 +8,10 @@
 //!
 //! Lock ordering: locks taken under another lock must sit strictly below it in
 //! a fixed hierarchy. In particular the frame-allocator and page-table locks
-//! are below the heap lock, and code holding them must not allocate.
+//! are below the heap lock, and code holding them must not allocate. The
+//! kernel's own locks nest in this order, outermost first: `IPC`, `CSPACES`,
+//! `SCHED`, the thread table's `SPACES`, `KERNEL_SPACE`, then the frame
+//! allocator. No lock is held across a context switch.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

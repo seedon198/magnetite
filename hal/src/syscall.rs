@@ -8,9 +8,11 @@
 //! (`rcx`/`r11` are reserved by the CPU for the return RIP/RFLAGS); `rax`
 //! returns a status word.
 //!
-//! The entry stub switches to a dedicated kernel stack (single-core bring-up; a
-//! per-CPU/GS scheme comes with SMP). A registered kernel [`Handler`] does the
-//! work. See [ADR 0017](../../docs/adr/0017-threads-and-scheduling.md).
+//! The entry stub switches to the current thread's own kernel stack, which the
+//! kernel installs with [`set_kernel_stack`] on every context switch (single
+//! core; a per-CPU/GS scheme comes with SMP). A registered kernel [`Handler`]
+//! does the work. See [ADR 0017](../../docs/adr/0017-threads-and-scheduling.md)
+//! and [ADR 0019](../../docs/adr/0019-first-user-task.md).
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -67,7 +69,8 @@ pub type Handler = fn(&SyscallArgs) -> u64;
 
 static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Dedicated kernel stack for the syscall entry stub (single-core bring-up).
+/// Fallback kernel stack for the syscall entry stub, used until the kernel
+/// installs a thread's own with [`set_kernel_stack`].
 #[repr(C, align(16))]
 struct KStack([u8; 16 * 1024]);
 static SYSCALL_KSTACK: Racy<KStack> = Racy::new(KStack([0; 16 * 1024]));
