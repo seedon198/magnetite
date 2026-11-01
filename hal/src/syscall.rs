@@ -35,17 +35,24 @@ const STAR_VALUE: u64 = (0x08u64 << 32) | (0x18u64 << 48);
 /// set faults in ring 0. Linux masks NT for the same reason.
 const FMASK_VALUE: u64 = 0x200 | 0x100 | 0x400 | 0x4_0000 | 0x4000;
 
-/// Raw system-call arguments, as the entry stub lays them out.
+/// Raw system-call arguments, as the entry stub lays them out. The handler
+/// may overwrite `cap`, `msg_info` and `mr`: the stub loads them back into
+/// `rdi`, `rsi`, `rdx`, `r8`, `r9` and `r10` for the return to ring 3
+/// (ADR 0019 decision 6: badge, message info and message registers out).
 #[repr(C)]
 pub struct SyscallArgs {
     /// The syscall number (`rax`).
     pub number: u64,
-    /// Invoked capability id (`rdi`).
+    /// Invoked capability id (`rdi`); the badge on the way out.
     pub cap: u64,
     /// Packed `MessageInfo` (`rsi`).
     pub msg_info: u64,
     /// Message registers 0-3 (`rdx`, `r8`, `r9`, `r10`).
     pub mr: [u64; 4],
+    /// Receive slot (`r12`); `u64::MAX` for none. Returned unchanged.
+    pub recv_slot: u64,
+    /// Slot of the capability to send (`r13`). Returned unchanged.
+    pub send_slot: u64,
 }
 
 /// A fresh ring-3 entry: where to start and the initial message.
@@ -65,7 +72,7 @@ pub struct UserEntry {
 
 /// A kernel system-call handler: given the arguments, returns a status word
 /// (delivered to the caller in `rax`).
-pub type Handler = fn(&SyscallArgs) -> u64;
+pub type Handler = fn(&mut SyscallArgs) -> u64;
 
 static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -128,7 +135,7 @@ pub fn enter_user_once(entry: &UserEntry) -> ! {
 
 /// The Rust trampoline the entry stub calls: dispatch to the registered handler.
 #[unsafe(no_mangle)]
-extern "C" fn syscall_dispatch(args: *const SyscallArgs) -> u64 {
+extern "C" fn syscall_dispatch(args: *mut SyscallArgs) -> u64 {
     let raw = HANDLER.load(Ordering::Acquire);
     if raw.is_null() {
         return u64::MAX;
@@ -137,7 +144,7 @@ extern "C" fn syscall_dispatch(args: *const SyscallArgs) -> u64 {
     // points at the `SyscallArgs` the entry stub built on the kernel stack.
     unsafe {
         let handler: Handler = core::mem::transmute(raw);
-        handler(&*args)
+        handler(&mut *args)
     }
 }
 
@@ -152,8 +159,9 @@ extern "C" {
 // and push it there (so a thread that blocks in a syscall keeps its own), build a
 // `SyscallArgs` on it, call the dispatcher, then restore and `sysretq`. IF is clear
 // throughout (FMASK). ABI: rax=number, rdi=cap, rsi=msg_info, rdx/r8/r9/r10 =
-// mr0..3; rax = status out. Ten words are pushed, keeping rsp 16-byte aligned for
-// the call.
+// mr0..3, r12 = receive slot, r13 = slot to send; rax = status out, and rdi,
+// rsi, rdx, r8 to r10 are reloaded from SyscallArgs (the handler's outputs).
+// Twelve words are pushed, keeping rsp 16-byte aligned for the call.
 //
 // enter_user_once_asm `iretq`s to ring 3 for good with the message registers
 // loaded and the scratch registers cleared. User selectors: CS 0x2b, SS 0x23
@@ -167,6 +175,8 @@ global_asm!(
     "    push qword ptr [rip + SYSCALL_USER_RSP]", // user RSP, kept on this stack
     "    push rcx",                                // user RIP
     "    push r11",                                // user RFLAGS
+    "    push r13",                                // send slot
+    "    push r12",                                // receive slot
     "    push r10",                                // mr3
     "    push r9",                                 // mr2
     "    push r8",                                 // mr1
@@ -185,7 +195,7 @@ global_asm!(
     "    mov r8,  [rsp + 32]",
     "    mov r9,  [rsp + 40]",
     "    mov r10, [rsp + 48]",
-    "    add rsp, 56", // pop the seven SyscallArgs words (rax holds status)
+    "    add rsp, 72", // pop the nine SyscallArgs words (rax holds status)
     "    pop r11",
     "    pop rcx",
     "    pop rsp", // user RSP

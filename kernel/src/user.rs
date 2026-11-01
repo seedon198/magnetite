@@ -22,10 +22,10 @@ use crate::{KERNEL_SPACE, SCHED};
 const USER_CODE_VA: u64 = 0x40_0000;
 const USER_STACK_VA: u64 = 0x7fff_f000;
 
-/// Syscall numbers PR 1 understands (the full ABI is PR 2). `report` and
-/// `yield` exist for the demo's regression checks.
-const SYS_HELLO: u64 = 1;
-const SYS_REPORT: u64 = 2;
+/// Debug syscalls for the mechanism checks below, outside the ABI's numbers
+/// and honoured only for the threads this demo spawns.
+const SYS_HELLO: u64 = 0x100;
+const SYS_REPORT: u64 = 0x101;
 const SYS_YIELD: u64 = 6;
 const SYS_EXIT: u64 = 7;
 
@@ -35,6 +35,9 @@ static MR0: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX
 static RSP_OFFSET: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
 /// Values user threads reported with `report`, OR-ed together per thread.
 static REPORT: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
+
+/// The demo's threads, one bit each: only they may use the debug syscalls.
+static DEBUG_THREADS: AtomicU64 = AtomicU64::new(0);
 
 /// User demo threads that exited or were killed.
 static DONE: AtomicU64 = AtomicU64::new(0);
@@ -77,9 +80,10 @@ pub fn spawn_user(t: ThreadId, stack_slot: usize, code: &[u8], mr0: u64, rsp_off
     if !mapped {
         return false;
     }
+    DEBUG_THREADS.fetch_or(1 << t.0, Ordering::Relaxed);
     MR0[t.0].store(mr0, Ordering::Relaxed);
     RSP_OFFSET[t.0].store(rsp_offset, Ordering::Relaxed);
-    thread::set_kernel_stack(t, kstack);
+    thread::set_kernel_stack(t, stack_slot, kstack);
     thread::set_address_space(t, space);
     CONTEXTS[t.0].init(kstack, user_entry);
     hal::cpu::without_interrupts(|| SCHED.lock().admit(t))
@@ -101,9 +105,11 @@ extern "C" fn user_entry() -> ! {
 }
 
 /// The system-call handler (PR 1): `hello` logs, `exit` ends the thread.
-fn syscall(args: &SyscallArgs) -> u64 {
+fn syscall(args: &mut SyscallArgs) -> u64 {
     let t = SCHED.lock().current().expect("user: a running thread");
+    let debug = DEBUG_THREADS.load(Ordering::Relaxed) & (1 << t.0) != 0;
     match args.number {
+        SYS_HELLO | SYS_REPORT if !debug => u64::MAX,
         SYS_HELLO => {
             crate::info!(
                 "user: thread {} in ring 3, own address space (mr0={:#x})",
@@ -145,6 +151,11 @@ fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
     crate::exit_current()
 }
 
+/// Frames currently free.
+fn free_frames() -> usize {
+    hal::frame::stats().map_or(0, |s| s.free)
+}
+
 /// Prove the mechanism, and pin the failure modes a review found:
 ///
 /// - threads 7 and 8 say hello, block inside the kernel (`yield`) across each
@@ -156,22 +167,33 @@ fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
 /// - thread 11 sets `RFLAGS.NT` and exits: the flag must not leak into the
 ///   kernel, where a later `iretq` would fault in ring 0.
 pub fn demo(boot_info: &BootInfo, preemptive: bool) {
-    // hello; yield; report rsp; spin 0x2000000; exit
+    // Assembled with `llvm-mc -triple=x86_64 -filetype=obj` and
+    // `llvm-objcopy -O binary --only-section=.text`, from:
+    //   mov eax, 0x100; syscall            (hello)
+    //   mov eax, 6; syscall                (yield)
+    //   mov rdx, rsp; mov eax, 0x101; syscall   (report rsp)
+    //   mov r12d, 0x2000000; 1: dec r12d; jnz 1b
+    //   mov eax, 7; syscall; 2: jmp 2b     (exit)
     const YIELD_REPORT: [u8; 44] = [
-        0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x06, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48,
-        0x89, 0xe2, 0xb8, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x41, 0xbc, 0x00, 0x00, 0x00, 0x02,
+        0xb8, 0x00, 0x01, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x06, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48,
+        0x89, 0xe2, 0xb8, 0x01, 0x01, 0x00, 0x00, 0x0f, 0x05, 0x41, 0xbc, 0x00, 0x00, 0x00, 0x02,
         0x41, 0xff, 0xcc, 0x75, 0xfb, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
     ];
-    // rax = OR of all registers at entry; report; rax = OR of rdi, rsi, r8 to
-    // r10, rbx, rbp, r12 to r15 after the syscall; report; exit
-    const LEAK: [u8; 104] = [
+    // rax = OR of all registers at entry; mov rdx, rax; set r12 = 0x12 and
+    // r13 = 0x13; report (0x101); xor them back; rax = OR of rdi, rsi, r8 to
+    // r10, rbx, rbp, r12 to r15 after the syscall; report; exit. Both reports
+    // are zero exactly when no kernel value reached ring 3 and r12/r13 came
+    // back unchanged. Assembled as YIELD_REPORT.
+    const LEAK: [u8; 124] = [
         0x48, 0x89, 0xe8, 0x48, 0x09, 0xd8, 0x48, 0x09, 0xc8, 0x48, 0x09, 0xd0, 0x48, 0x09, 0xf0,
         0x48, 0x09, 0xf8, 0x4c, 0x09, 0xc0, 0x4c, 0x09, 0xc8, 0x4c, 0x09, 0xd0, 0x4c, 0x09, 0xd8,
         0x4c, 0x09, 0xe0, 0x4c, 0x09, 0xe8, 0x4c, 0x09, 0xf0, 0x4c, 0x09, 0xf8, 0x48, 0x89, 0xc2,
-        0xb8, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x89, 0xf8, 0x48, 0x09, 0xf0, 0x4c, 0x09,
-        0xc0, 0x4c, 0x09, 0xc8, 0x4c, 0x09, 0xd0, 0x48, 0x09, 0xd8, 0x48, 0x09, 0xe8, 0x4c, 0x09,
-        0xe0, 0x4c, 0x09, 0xe8, 0x4c, 0x09, 0xf0, 0x4c, 0x09, 0xf8, 0x48, 0x89, 0xc2, 0xb8, 0x02,
-        0x00, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
+        0x41, 0xbc, 0x12, 0x00, 0x00, 0x00, 0x41, 0xbd, 0x13, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x01,
+        0x00, 0x00, 0x0f, 0x05, 0x49, 0x83, 0xf4, 0x12, 0x49, 0x83, 0xf5, 0x13, 0x48, 0x89, 0xf8,
+        0x48, 0x09, 0xf0, 0x4c, 0x09, 0xc0, 0x4c, 0x09, 0xc8, 0x4c, 0x09, 0xd0, 0x48, 0x09, 0xd8,
+        0x48, 0x09, 0xe8, 0x4c, 0x09, 0xe0, 0x4c, 0x09, 0xe8, 0x4c, 0x09, 0xf0, 0x4c, 0x09, 0xf8,
+        0x48, 0x89, 0xc2, 0xb8, 0x01, 0x01, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x07, 0x00, 0x00, 0x00,
+        0x0f, 0x05, 0xeb, 0xfe,
     ];
     // pushfq; or qword [rsp], 0x4000 (NT); popfq; exit
     const SET_NT_EXIT: [u8; 19] = [
@@ -184,6 +206,7 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     fault[2..10].copy_from_slice(&boot_info.hhdm_offset.to_le_bytes());
     fault[10..].copy_from_slice(&[0xEB, 0xFE]);
 
+    let free_before = free_frames();
     hal::syscall::init();
     hal::syscall::register(syscall);
     hal::idt::register_user_fault(user_fault);
@@ -230,4 +253,16 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         "user: two tasks blocked inside syscalls and came back on their own stacks, were preempted in ring 3 ({n} times) and exited"
     );
     crate::info!("user: no kernel register reached ring 3; RFLAGS.NT did not leak; a kernel read from ring 3 was contained");
+
+    // Every frame the five tasks used (code, stack, page tables, kernel stack)
+    // comes back once they are reaped.
+    let reclaimed: usize = (7..=11).map(|t| thread::reap(ThreadId(t))).sum();
+    let free_after = free_frames();
+    assert_eq!(
+        free_after,
+        free_before,
+        "user: exited tasks leaked {} frames",
+        free_before.saturating_sub(free_after)
+    );
+    crate::info!("user: reclaimed {reclaimed} frames from 5 exited tasks");
 }
