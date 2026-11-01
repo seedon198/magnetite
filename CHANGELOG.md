@@ -48,9 +48,12 @@ All notable changes are documented here. The format follows
   - #81 follow-ups: an `InvalidCap` IPC error, a `ReplyRecv` kernel wrapper,
     and the HHDM offset set during init.
   - The frame allocator gains aligned contiguous runs.
-  - CI's boot test now waits for `ready:` (every boot-time self-check passed)
-    and fails at once on a kernel panic; before, it passed at the first log
-    line.
+  - CI's boot test now requires the root task's success line and `ready:`
+    (every boot-time self-check passed), matched as whole kernel log lines so
+    console output cannot fake them, and fails at once on a kernel panic;
+    before, it passed at the first log line.
+  - A missing or malformed program module is refused and the kernel boots on
+    without it; a refused retype leaves the task's Untyped untouched.
   - New page: [System calls](docs/architecture/syscalls.md).
 
 - User-mode mechanism (#82, PR 1 of 2), per

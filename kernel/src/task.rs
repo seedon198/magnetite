@@ -243,8 +243,28 @@ fn free_frames() -> usize {
 /// Load the fault task, and a corrupted copy of it: the copy is refused before
 /// anything is mapped, the task is killed by its page fault, and every frame
 /// it used comes back.
+///
+/// A missing or malformed module is logged and skipped, and the kernel boots
+/// on without it (ADR 0019 decision 1); CI's boot test still fails, since it
+/// requires the root task's success line.
 pub fn demo(boot_info: &BootInfo) {
-    let fault = boot::module_bytes(boot_info.module("fault").expect("task: no fault module"));
+    match boot_info.module("fault").map(boot::module_bytes) {
+        Some(fault) => fault_demo(fault),
+        None => crate::warn!("task: no fault module; skipped"),
+    }
+    let console = console::start(CONSOLE);
+    match boot_info.module("root").map(boot::module_bytes) {
+        Some(root) => root_demo(console, root),
+        None => crate::warn!("task: no root module; skipped"),
+    }
+}
+
+/// The fault task, and a corrupted copy of it.
+fn fault_demo(fault: &[u8]) {
+    if let Err(e) = elf::parse(fault, ELF_LIMIT) {
+        crate::warn!("task: fault module refused ({e:?}); skipped");
+        return;
+    }
     let before = free_frames();
 
     let mut corrupted: Vec<u8> = fault.to_vec();
@@ -254,19 +274,33 @@ pub fn demo(boot_info: &BootInfo) {
     drop(corrupted);
     crate::info!("task: refused a corrupted image (BadMagic)");
 
-    spawn(FAULT, FAULT_STACK_SLOT, fault).expect("task: loading the fault task");
+    if let Err(e) = spawn(FAULT, FAULT_STACK_SLOT, fault) {
+        crate::warn!("task: fault task not loaded ({e:?}); skipped");
+        return;
+    }
     while !thread::has_exited(FAULT) {
         crate::yield_now();
     }
     thread::reap(FAULT);
     assert_eq!(free_frames(), before, "task: the fault task leaked frames");
     crate::info!("task: fault task contained and reclaimed");
+}
 
-    // The root task, talking to the console server over IPC.
-    let console = console::start(CONSOLE);
-    let root = boot::module_bytes(boot_info.module("root").expect("task: no root module"));
+/// The root task, talking to the console server over IPC.
+fn root_demo(console: ObjectRef, root: &[u8]) {
     let before = free_frames();
-    let boot = bootstrap_root(ROOT, console, root).expect("task: creating the root task");
+    let boot = match bootstrap_root(ROOT, console, root) {
+        Ok(boot) => boot,
+        Err(e) => {
+            assert_eq!(
+                free_frames(),
+                before,
+                "task: a refused root task leaked frames"
+            );
+            crate::warn!("task: root module refused ({e:?}); skipped");
+            return;
+        }
+    };
     while !thread::has_exited(ROOT) {
         crate::yield_now();
     }

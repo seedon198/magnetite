@@ -241,9 +241,12 @@ fn kmain(boot_info: &BootInfo) -> ! {
 /// `KernelAndModules`).
 fn check_modules(boot_info: &BootInfo) {
     for name in ["root", "fault"] {
-        let m = boot_info
-            .module(name)
-            .unwrap_or_else(|| panic!("boot: module {name} missing"));
+        // A missing or malformed program is not fatal (ADR 0019 decision 1):
+        // the loader refuses it later and the kernel boots on without it.
+        let Some(m) = boot_info.module(name) else {
+            warn!("boot: module {name} missing");
+            continue;
+        };
         let phys = m.address - boot_info.hhdm_offset;
         let end = phys + m.size;
         let overlaps_usable = boot_info.regions().iter().any(|r| {
@@ -253,10 +256,9 @@ fn check_modules(boot_info: &BootInfo) {
             !overlaps_usable,
             "boot: module {name} lies in usable memory"
         );
-        assert!(
-            boot::module_bytes(m).starts_with(b"\x7fELF"),
-            "boot: module {name} is not an ELF file"
-        );
+        if !boot::module_bytes(m).starts_with(b"\x7fELF") {
+            warn!("boot: module {name} is not an ELF file");
+        }
     }
     let size = |name| boot_info.module(name).map_or(0, |m| m.size);
     info!(
