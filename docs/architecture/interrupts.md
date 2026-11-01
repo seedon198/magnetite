@@ -134,6 +134,18 @@ next thread's kernel stack and loads its address space, so:
   any caller waiting on it for a reply, with `PeerExited`). It keys on the trap
   frame, never on which thread is current, so a fault in ring 0 stays fatal.
 
+### The syscall frame (#82)
+
+The `syscall` entry stub saves the user `rsp`, `rcx` and `r11` on the thread's
+kernel stack, then pushes `r13`, `r12`, `r10`, `r9`, `r8`, `rdx`, `rsi`, `rdi`
+and `rax` as a `SyscallArgs` (twelve words, keeping the stack 16-byte aligned
+for the call). The handler, `syscall::handle`, may overwrite the capability,
+message-info and message-register fields; the stub loads them back into `rdi`,
+`rsi`, `rdx`, `r8`, `r9` and `r10` before `sysretq`, so a receive returns its
+badge and message, and no value the Rust handler left in a scratch register
+reaches ring 3. `r12` and `r13` are callee-saved and come back unchanged. The
+ABI itself is in [System calls](syscalls.md).
+
 ### Limits (future work)
 
 - Single core only: one LAPIC, one run queue, no IPIs. SMP needs per-CPU state.

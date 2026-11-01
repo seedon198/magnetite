@@ -1,6 +1,6 @@
 # 0019: The first user task: loading, confinement and the syscall ABI
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-01
 
 ## Context
@@ -179,6 +179,27 @@ confinement from both sides: refused capabilities, and memory it does not own.
    existing stub moved into its own address space.
 2. **The task:** `libs/elf`, `libs/sys`, `user/root`, `user/fault`, the boot
    module, the syscall ABI, the console server and the bootstrap.
+
+## Implementation notes
+
+Delivered in #99 (mechanism) and the PR that closes #82. Choices made while
+building it, within this design:
+
+- The console protocol uses `Call`, not `Send`: each write is acknowledged, so
+  a task's lines stay in order, and the server's loop is `ReplyRecv`.
+- A `Call` on a kernel object replies with `MessageInfo` label 0, length 4 and
+  badge 0, the result in the message registers.
+- Resolving the invoked slot itself fails with `InvalidCap` for IPC and object
+  methods alike; slots a method names keep the finer `Cap*` codes.
+- The root task's 64 KiB Untyped is one aligned run from the frame allocator
+  (`alloc_contiguous`), a narrow amendment to ADR 0010's deferral.
+- `libs/sys` holds the user side of `syscall` and the `_start` entry; ADR 0007
+  is amended for it. User programs stay `#![forbid(unsafe_code)]`.
+- Every frame of an exited task is reclaimed: its user half, page tables and
+  kernel stack, and for the root task the memory behind its capabilities. The
+  boot checks the free-frame count returns to where it was.
+- The PR 1 test stubs keep running with two debug syscalls (`0x100`, `0x101`)
+  honoured only for their own threads.
 
 ## Consequences
 

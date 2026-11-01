@@ -28,7 +28,9 @@ kernel; others are design commitments realized in later milestones.
 | CPU availability | A thread that never yields (buggy or hostile) starving every other thread | LAPIC-timer preemption, 10 ms round-robin slices ✓ for kernel threads (M4, #80) and for ring 3, on per-thread kernel stacks ✓ (#82); interrupt-safe locks keep preemption deadlock-free |
 | Code injection | Overwriting code, running injected code | W^X + NX enforced and verified; HHDM non-executable; SMEP/SMAP enabled ✓ (M2). `Frame` caps separate map/exec rights (later) |
 | Exploit reliability | Predictable kernel addresses | Kernel KASLR ✓; stack guard pages ✓; zeroed-on-alloc frames ✓ (M2) |
-| Hostile input | Malicious packets, filesystems, images | Parsed only in sandboxed servers; fuzzed in CI |
+| Hostile input | Malicious packets, filesystems, images | Parsed only in sandboxed servers; fuzzed in CI. The one parser in the kernel, for user program images, is pure safe Rust and checks every header and segment before anything is mapped, host-tested against malformed and truncated files ✓ (`libs/elf`, #82) |
+| Syscall boundary | A task passing hostile registers, naming slots it does not hold, or probing for kernel addresses | Every argument decoded and range-checked in pure, host-tested code (`capability::abi`); slot 0 and unknown numbers refused; a task can name only its own capabilities; no physical address ever returned ✓ (#82) |
+| Kernel as a side channel | The kernel printing or acting for a task without a capability | The kernel never prints for a task: output goes over IPC to a console server, which sees the sender's badge ✓ (#82) |
 | Supply chain | Compromised dependency | Minimal deps; `cargo deny` / `cargo audit`; pinned toolchain; vendored Limine ✓ |
 
 ### Trust boundaries
