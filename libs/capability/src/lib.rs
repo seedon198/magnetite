@@ -19,7 +19,7 @@ pub mod invoke;
 pub mod object;
 pub mod space;
 
-pub use abi::{MessageInfo, MSG_REGISTERS};
+pub use abi::{MessageInfo, SysError, MSG_REGISTERS, NO_SLOT};
 pub use invoke::{InvokeError, InvokeOk, Method};
 pub use object::{
     cnode_bytes, slot_align, EndpointState, NotificationState, ObjectKind, ObjectRef, Untyped,
