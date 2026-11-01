@@ -36,13 +36,6 @@ impl Context {
         self.rsp.load(Ordering::Relaxed)
     }
 
-    /// A pointer to the saved-`rsp` slot, for assembly that stores into it
-    /// (the context switch and the syscall layer's `enter_user`).
-    #[must_use]
-    pub fn save_ptr(&self) -> *mut u64 {
-        self.rsp.as_ptr()
-    }
-
     /// Prepare a fresh thread: when first switched to, it begins executing
     /// `entry` on the stack whose top (highest address) is `stack_top`, with
     /// interrupts **enabled** (so it can be preempted, #80).
@@ -95,33 +88,6 @@ pub fn switch(prev: &Context, next: &Context) {
     // frame. The asm touches only the two stacks and callee-saved registers.
     unsafe {
         context_switch(prev.rsp.as_ptr(), next_rsp);
-    }
-}
-
-/// Resume a context one-way: restore the callee-saved registers and stack
-/// pointer saved at `saved_rsp` and return into whoever saved it (via
-/// [`switch`] or the syscall layer's `enter_user`). Never returns to the caller;
-/// the current stack is abandoned. Used to hand control back to a saved
-/// thread from a context with no continuation of its own (e.g. a syscall
-/// handler returning to the boot thread).
-pub fn resume(saved_rsp: u64) -> ! {
-    // SAFETY: `saved_rsp` points at a valid callee-saved frame laid down by
-    // `context_switch`/`enter_user` (six registers then a return address);
-    // restoring it resumes that context. Abandoning the current stack is
-    // intentional.
-    unsafe {
-        core::arch::asm!(
-            "mov rsp, {0}",
-            "pop r15",
-            "pop r14",
-            "pop r13",
-            "pop r12",
-            "pop rbx",
-            "pop rbp",
-            "ret",
-            in(reg) saved_rsp,
-            options(noreturn),
-        );
     }
 }
 

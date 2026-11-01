@@ -78,7 +78,7 @@ Bring-up (`init_preemption` in `kmain`, after the ring-3 demo):
 Every timer interrupt runs the kernel's `timer_interrupt`:
 
 <p align="center">
-  <img src="../assets/timer-preemption.svg" alt="Timer preemption: the LAPIC timer IRQ builds a TrapFrame, timer_interrupt counts the tick, sends EOI, returns early for ring 3, picks the next thread and switches; a later tick switches back and iretq resumes the thread" width="820">
+  <img src="../assets/timer-preemption.svg" alt="Timer preemption: the LAPIC timer IRQ builds a TrapFrame, timer_interrupt counts the tick, sends EOI, picks the next thread and switches (from kernel or user mode alike); a later tick switches back and iretq resumes the thread" width="820">
 </p>
 
 Because the interrupted thread's full register state is already in its
@@ -116,14 +116,26 @@ interleaved progress, and a stress variant (1 kHz timer; both threads
 allocating, using the frame allocator and logging in a tight loop) ran ~6000
 preemptions with no deadlock.
 
+### Ring 3: per-thread kernel stacks and fault containment (#82)
+
+Every user thread has its own 16 KiB kernel stack, above an unmapped guard
+page ([ADR 0019](../adr/0019-first-user-task.md)). `thread::switch_to`, the one
+path every context switch takes, points `TSS.rsp0` and the syscall entry at the
+next thread's kernel stack and loads its address space, so:
+
+- **Ring 3 is preempted like kernel code.** A tick in user mode enters on that
+  thread's own kernel stack; its `TrapFrame` stays there while others run.
+- **A thread can block inside a syscall.** The syscall stub keeps the user
+  `rsp` on the thread's kernel stack, not in a global across the call. The stub
+  itself runs with `IF = 0` (`FMASK`).
+- **A CPU exception raised in ring 3 ends that thread, never the kernel.**
+  `idt_dispatch` routes vectors 0 to 31 whose trap frame has `CS & 3 == 3` to the
+  kernel's user-fault handler, which logs the fault and exits the thread (waking
+  any caller waiting on it for a reply, with `PeerExited`). It keys on the trap
+  frame, never on which thread is current, so a fault in ring 0 stays fatal.
+
 ### Limits (future work)
 
-- **Ring 3 is not preempted yet.** A timer tick that interrupts user mode only
-  EOIs and returns: interrupts from ring 3 enter on the single `TSS.rsp0`
-  stack, which two preempted user threads would share. Per-thread kernel stacks
-  (switching `rsp0` on every context switch) come with the first user task
-  (#82). The `syscall` path runs with `IF = 0` (`FMASK`), so it is not
-  preempted either.
 - Single core only: one LAPIC, one run queue, no IPIs. SMP needs per-CPU state.
 - xAPIC (MMIO) mode only; x2APIC is a later refinement. No I/O APIC yet -
   device IRQs arrive with driver servers (M5/M6).

@@ -37,6 +37,8 @@ pub enum MapError {
     AlreadyMapped,
     /// The virtual or physical address was not 4 KiB-aligned.
     Misaligned,
+    /// A user mapping at or above [`USER_TOP`], where user code may never be.
+    NotUserAddress,
 }
 
 /// Why a [`AddressSpace::protect`] call failed.
@@ -48,6 +50,12 @@ pub enum ProtectError {
     /// cannot repermission.
     HugePage,
 }
+
+/// The end of the mappable user range. The last page of the lower half
+/// (`0x7fff_ffff_f000`) is never mapped for user code: a `syscall` in it would
+/// return to the non-canonical `0x8000_0000_0000`, and `sysretq` then faults
+/// in ring 0 on Intel with the user's stack pointer already loaded.
+pub const USER_TOP: u64 = 0x7fff_ffff_f000;
 
 /// A virtual address space: a root PML4 and the HHDM offset used to reach its
 /// tables.
@@ -79,6 +87,76 @@ impl AddressSpace {
         Some(Self { root, hhdm })
     }
 
+    /// Build a user address space: a fresh PML4 whose kernel half (entries
+    /// 256 to 511) is copied from `kernel`'s root, and whose user half is
+    /// empty. The copied entries have `USER` cleared. Returns `None` if no
+    /// frame is free.
+    ///
+    /// The copied entries point at the kernel's own lower-level tables, so the
+    /// kernel half stays shared as long as the kernel never adds a top-level
+    /// entry later; [`populate_higher_half`](Self::populate_higher_half) on the
+    /// kernel space guarantees that.
+    pub fn new_user(kernel: &AddressSpace) -> Option<Self> {
+        let root = frame::alloc_frame()?; // zeroed by the allocator
+        let hhdm = kernel.hhdm;
+        for i in HIGHER_HALF_START..ENTRY_COUNT {
+            let e = kernel.entry(kernel.root.addr(), i);
+            assert!(e.is_present(), "paging: kernel half not populated");
+            // Limine sets `USER` on some kernel-half entries; ring 3 must
+            // never reach the kernel half, so the copy is supervisor-only.
+            let bits = e.bits() & !PageTableFlags::USER.bits();
+            let dst = ((hhdm + root.addr()) as *mut u64).wrapping_add(i);
+            // SAFETY: `root` is a freshly allocated, zeroed 4 KiB frame we
+            // exclusively own, mapped in the HHDM; `i < 512` keeps the write
+            // in bounds and aligned.
+            unsafe { dst.write_volatile(bits) }
+        }
+        Some(Self { root, hhdm })
+    }
+
+    /// Whether every kernel-half top-level entry (256 to 511) has `USER`
+    /// clear, so nothing in the kernel half is reachable from ring 3 whatever
+    /// the lower levels say.
+    #[must_use]
+    pub fn kernel_half_supervisor_only(&self) -> bool {
+        (HIGHER_HALF_START..ENTRY_COUNT).all(|i| {
+            !self
+                .entry(self.root.addr(), i)
+                .flags()
+                .contains(PageTableFlags::USER)
+        })
+    }
+
+    /// Give every empty kernel-half top-level entry (256 to 511) a fresh,
+    /// zeroed table, present and writable but not user-accessible. Call once
+    /// on the kernel space before creating any user space, so that every
+    /// later kernel mapping lands in tables all address spaces share. Returns
+    /// `false` if frames ran out.
+    pub fn populate_higher_half(&mut self) -> bool {
+        for i in HIGHER_HALF_START..ENTRY_COUNT {
+            if self.entry(self.root.addr(), i).is_present() {
+                continue;
+            }
+            let Some(table) = frame::alloc_frame() else {
+                return false;
+            };
+            let e = PageTableEntry::new(
+                table.addr(),
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            );
+            // SAFETY: in-bounds entry of our own PML4, reached via the HHDM;
+            // it was empty, and `table` is a fresh zeroed frame we own.
+            unsafe { self.entry_ptr(self.root.addr(), i).write_volatile(e.bits()) }
+        }
+        true
+    }
+
+    /// The physical address of this space's root table, to tell spaces apart.
+    #[must_use]
+    pub fn root_phys(&self) -> u64 {
+        self.root.addr()
+    }
+
     /// Install this address space in `CR3`, making its mappings active.
     ///
     /// Sound because every `AddressSpace` maps the kernel higher half by
@@ -99,6 +177,9 @@ impl AddressSpace {
     pub fn map(&mut self, virt: u64, phys: u64, flags: PageTableFlags) -> Result<(), MapError> {
         if !page_table::is_page_aligned(virt) || !page_table::is_page_aligned(phys) {
             return Err(MapError::Misaligned);
+        }
+        if flags.contains(PageTableFlags::USER) && virt >= USER_TOP {
+            return Err(MapError::NotUserAddress);
         }
         let idx = table_indices(virt);
         // Intermediate tables must be reachable with at least the leaf's

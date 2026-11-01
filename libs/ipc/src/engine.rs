@@ -254,6 +254,22 @@ impl Ipc {
         out
     }
 
+    /// `me` is exiting: clear its IPC state. A caller waiting in its reply
+    /// slot would otherwise wait forever, so it is woken with `PeerExited`.
+    ///
+    /// `me` must be running, so it is on no endpoint queue (a blocked thread
+    /// cannot exit; it is not executing).
+    pub fn exit(&mut self, me: ThreadId) -> Outcome {
+        let mut out = Outcome::new(Effect::Done);
+        if let Some(caller) = self.t[me.0].reply_to.take() {
+            self.t[caller.0].state = State::Idle;
+            self.t[caller.0].result = Some(Err(IpcError::PeerExited));
+            out.push(caller);
+        }
+        self.t[me.0] = Tcb::IDLE;
+        out
+    }
+
     /// `Reply` (if the reply slot holds a caller), then `Recv`, as one
     /// operation: a server's loop. With an empty reply slot it just receives.
     /// If the reply fails, the receive does not run.

@@ -55,6 +55,8 @@ pub enum IpcError {
     NoReplySlot,
     /// `Recv` while still holding a caller in the reply slot.
     ReplySlotFull,
+    /// The thread this caller was waiting on for a reply exited.
+    PeerExited,
 }
 
 /// Which kind of thread an endpoint's queue holds; never both at once.
@@ -907,6 +909,58 @@ mod tests {
             Some(Err(IpcError::ReceiveSlotFull))
         );
         assert_eq!(ipc.take_result(client), None);
+    }
+
+    #[test]
+    fn exit_wakes_caller_in_reply_slot() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        ipc.call(
+            &mut NoCaps,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.take_result(T1);
+        let o = ipc.exit(T1);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::PeerExited)));
+    }
+
+    #[test]
+    fn exit_with_empty_reply_slot_wakes_nobody() {
+        let mut ipc = Ipc::new();
+        let o = ipc.exit(T1);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T1), None);
+    }
+
+    #[test]
+    fn exited_thread_can_be_reused() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        ipc.call(
+            &mut NoCaps,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.exit(T1);
+        let o = ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        assert_eq!(
+            o.caller,
+            Effect::Block,
+            "a fresh receive works: no stale reply slot"
+        );
     }
 
     #[test]

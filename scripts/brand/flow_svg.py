@@ -118,7 +118,7 @@ f.arrow()
 f.card("timer_interrupt", "kernel/src/main.rs", [
     ("TICKS += 1", ""),
     ("lapic::eoi()", "before switching: the next thread may run a whole slice first"),
-    ("ring 3?", "if the tick interrupted user mode, return (see Limits)"),
+    ("ring 3 too", "a tick in user mode preempts the same way: each thread has its own kernel stack"),
     ("pick_next()", "SCHED.lock(), rotate round-robin; the lock is released here"),
     ("context::switch(cur, next)", "cur's TrapFrame stays on its own stack"),
 ], numbered=True)

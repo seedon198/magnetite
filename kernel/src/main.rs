@@ -16,6 +16,8 @@ mod banner;
 mod boot;
 mod ipc;
 mod log;
+mod thread;
+mod user;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -26,6 +28,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use hal::paging::{AddressSpace, Flags};
 use hal::serial::SerialPort;
 use hal::sync::SpinLock;
+use thread::CONTEXTS;
 
 /// The kernel's address space, established in [`init_paging`]. Held for later
 /// milestones (the heap and guard pages in #41, user address spaces in M4).
@@ -41,15 +44,6 @@ static HEAP: hal::heap::KernelHeap = hal::heap::KernelHeap::new();
 static SCHED: SpinLock<sched::Scheduler> = SpinLock::new(sched::Scheduler::new());
 /// Saved contexts, indexed by [`sched::ThreadId`]: boot, workers A/B, spinners
 /// C/D, IPC server and client.
-static CONTEXTS: [hal::context::Context; 7] = [
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-    hal::context::Context::new(),
-];
 /// Times each demo worker has been scheduled (proof the switch happened).
 static A_TICKS: AtomicU64 = AtomicU64::new(0);
 static B_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -77,12 +71,6 @@ const SPIN_ROUNDS: u64 = 4;
 const SPIN_ROUND_TICKS: u64 = 5;
 /// Kernel stack size for each spinner thread.
 const SPIN_STACK_BYTES: usize = 16 * 1024;
-
-/// Saved boot-thread context for the ring-3 demo (#79): `enter_user` saves here,
-/// and the "exit" syscall resumes it to return to the boot thread.
-static BOOT_RETURN: hal::context::Context = hal::context::Context::new();
-/// Count of ring-3 syscalls seen, so the second one is treated as "exit".
-static SYSCALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Virtual base of the kernel heap window. Deliberately placed *below* the
 /// KASLR window (the top 2 GiB, from [`HEAP_LIMIT`]): Limine always loads the
@@ -171,6 +159,13 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // recoverable-probe + classification path.
     init_fault_diagnostics(boot_info);
 
+    // Per-thread kernel stacks (#82): each sits above an unmapped guard page.
+    assert!(
+        thread::selftest(),
+        "thread: kernel stack guard page check failed"
+    );
+    info!("thread: kernel stack guard page verified");
+
     // Untyped memory & retype (M3, #55): demonstrate carving object storage
     // from an Untyped region with watermark accounting.
     demo_untyped(boot_info);
@@ -187,10 +182,6 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // threads switching via a hal context switch and the pure scheduler.
     demo_threads(boot_info);
 
-    // Ring 3 + syscall (M4, #79): enter a user stub, cross into the kernel via
-    // syscall, and return.
-    demo_syscall(boot_info);
-
     // Preemptive scheduling (M4, #80): the LAPIC timer drives the round-robin
     // scheduler, so threads are time-sliced without yielding.
     let preemptive = init_preemption();
@@ -201,6 +192,10 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // Synchronous IPC (M4, #81): a client and a server kernel thread, each with
     // its own capability space, call and reply over an Endpoint.
     ipc::demo(boot_info);
+
+    // User threads (M4, #82): each in its own address space with its own
+    // kernel stack, preempted in ring 3; a fault in ring 3 ends only the task.
+    user::demo(boot_info, preemptive);
 
     // Exercise the trap path end to end: a breakpoint (#BP) is a recoverable
     // trap, so the handler prints a report and execution resumes here.
@@ -220,7 +215,7 @@ fn kmain(boot_info: &BootInfo) -> ! {
             "cooperative scheduling"
         }
     );
-    info!("kernel: idling (timer running; no user tasks yet)");
+    info!("kernel: idling (timer running; user demo tasks exited)");
 
     hal::cpu::halt_loop();
 }
@@ -291,6 +286,7 @@ fn init_paging(boot_info: &BootInfo) {
         return;
     };
     aspace.switch();
+    thread::init_kernel_root(aspace.root_phys());
     info!("paging: running on our own PML4 (higher half inherited)");
     *KERNEL_SPACE.lock() = Some(aspace);
 
@@ -303,6 +299,55 @@ fn init_paging(boot_info: &BootInfo) {
     } else {
         warn!("paging: self-test FAILED");
     }
+
+    // User address spaces (#82, ADR 0019) copy the kernel half's top-level
+    // entries, so every one must exist before the first user space: anything
+    // the kernel maps later then lands in tables all spaces share.
+    let mut guard = KERNEL_SPACE.lock();
+    let Some(kernel) = guard.as_mut() else { return };
+    assert!(
+        kernel.populate_higher_half(),
+        "paging: out of frames populating the kernel half"
+    );
+    let probe = core::ptr::addr_of!(HEAP) as u64;
+    let isolated = AddressSpace::new_user(kernel).is_some_and(|mut user| {
+        let Some(frame) = hal::frame::alloc_frame() else {
+            return false;
+        };
+        const VA: u64 = 0x4000_0000;
+        let ok = user
+            .map(VA, frame.addr(), Flags::USER | Flags::NO_EXECUTE)
+            .is_ok()
+            && user.translate(VA) == Some(frame.addr())
+            && kernel.translate(VA).is_none()
+            && user.translate(probe).is_some()
+            && user.translate(probe) == kernel.translate(probe);
+        let supervisor_only = user.kernel_half_supervisor_only();
+        user.unmap(VA);
+        hal::frame::free_frame(frame);
+        ok && supervisor_only
+    });
+    assert!(isolated, "paging: user space isolation self-test failed");
+    // The top user page is never mappable: a `syscall` there would return to a
+    // non-canonical address, and `sysretq` faults in ring 0 on Intel with the
+    // user's stack pointer already loaded.
+    let top_refused = AddressSpace::new_user(kernel).is_some_and(|mut user| {
+        let Some(frame) = hal::frame::alloc_frame() else {
+            return false;
+        };
+        let refused = user
+            .map(hal::paging::USER_TOP, frame.addr(), Flags::USER)
+            .is_err();
+        hal::frame::free_frame(frame);
+        refused
+    });
+    assert!(
+        top_refused,
+        "paging: the last user page must not be mappable"
+    );
+    info!(
+        "paging: user space isolated (lower half private, kernel half shared and supervisor-only)"
+    );
 }
 
 /// Enforce W^X + NX: enable NX, set per-section kernel-image permissions
@@ -798,7 +843,7 @@ fn pick_next() -> Option<(sched::ThreadId, sched::ThreadId)> {
 fn yield_now() {
     hal::cpu::without_interrupts(|| {
         if let Some((cur, next)) = pick_next() {
-            hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+            thread::switch_to(cur, next);
         }
     });
 }
@@ -807,19 +852,23 @@ fn yield_now() {
 /// to the next one. Its context is never resumed (and its stack is leaked).
 fn exit_current() -> ! {
     hal::cpu::disable_interrupts();
-    let (cur, next) = {
+    let cur = SCHED
+        .lock()
+        .current()
+        .expect("sched: exit with an empty run queue");
+    // A caller waiting on this thread for a reply would wait forever: wake it
+    // with an error (lock order: IPC before SCHED).
+    let woken = ipc::exit_thread(cur);
+    let next = {
         let mut s = SCHED.lock();
-        let Some(cur) = s.current() else {
-            panic!("sched: exit with an empty run queue");
-        };
+        for t in woken.woken() {
+            s.admit(t);
+        }
         s.remove(cur);
         // Removing the front makes the next thread in line current.
-        let Some(next) = s.current() else {
-            panic!("sched: the last runnable thread exited");
-        };
-        (cur, next)
+        s.current().expect("sched: the last runnable thread exited")
     };
-    hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+    thread::switch_to(cur, next);
     unreachable!("sched: an exited thread was resumed");
 }
 
@@ -838,15 +887,15 @@ fn timer_interrupt(frame: &mut hal::idt::TrapFrame) {
     // before this handler resumes, and the APIC delivers no further timer
     // interrupt until this one is acknowledged.
     hal::lapic::eoi();
-    // Only kernel-mode code is preempted for now: ring 3 enters on the single
-    // TSS.rsp0 stack, which two preempted user threads would share. Per-thread
-    // kernel stacks arrive with the first user task (#82).
-    if frame.cs & 3 != 0 {
-        return;
-    }
+    // Ring 3 is preempted too: each user thread enters the kernel on its own
+    // kernel stack (#82), so its TrapFrame stays put while others run.
+    let from_user = frame.cs & 3 == 3;
     if let Some((cur, next)) = pick_next() {
         PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
-        hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+        if from_user {
+            thread::USER_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        thread::switch_to(cur, next);
     }
 }
 
@@ -909,83 +958,6 @@ fn demo_threads(boot_info: &BootInfo) {
     s.remove(ThreadId(2));
 }
 
-/// The kernel's system-call handler (#79). The first ring-3 syscall is logged
-/// (proving the message registers crossed correctly) and returns via `sysret`;
-/// the second is treated as "exit" and resumes the boot thread.
-fn syscall_handler(args: &hal::syscall::SyscallArgs) -> u64 {
-    let n = SYSCALLS.fetch_add(1, Ordering::Relaxed);
-    if n == 0 {
-        let mi = capability::MessageInfo::from_bits(args.msg_info);
-        info!(
-            "syscall: ring-3 call - cap={} label={} len={} mr0={:#x}",
-            args.cap,
-            mi.label(),
-            mi.length(),
-            args.mr[0]
-        );
-        0
-    } else {
-        info!("syscall: ring-3 exit - returning to the boot thread");
-        hal::context::resume(BOOT_RETURN.rsp()); // diverges; never returns here
-    }
-}
-
-/// Enter ring 3 for the first time and round-trip through the syscall boundary
-/// (#79): map a tiny user stub (`syscall; syscall; jmp .`) and stack, drop to
-/// ring 3, let it call in and out, then resume the boot thread.
-fn demo_syscall(boot_info: &BootInfo) {
-    use capability::MessageInfo;
-    use hal::paging::Flags;
-    use hal::syscall::UserEntry;
-
-    const USER_CODE_VA: u64 = 0x4000_0000;
-    const USER_STACK_VA: u64 = 0x5000_0000;
-    let hhdm = boot_info.hhdm_offset;
-
-    hal::syscall::init();
-    hal::syscall::register(syscall_handler);
-
-    let (Some(code), Some(stack)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame()) else {
-        warn!("syscall: no frames for the user demo");
-        return;
-    };
-    // User stub: `syscall; syscall; jmp .` (the jmp is a safety net; the second
-    // syscall never returns - the handler resumes the boot thread).
-    hal::object::write_phys(code.addr(), hhdm, &[0x0f, 0x05, 0x0f, 0x05, 0xeb, 0xfe]);
-
-    {
-        let mut guard = KERNEL_SPACE.lock();
-        let Some(aspace) = guard.as_mut() else {
-            warn!("syscall: no address space");
-            return;
-        };
-        // Code: user R-X. Stack: user RW+NX.
-        if aspace.map(USER_CODE_VA, code.addr(), Flags::USER).is_err()
-            || aspace
-                .map(
-                    USER_STACK_VA,
-                    stack.addr(),
-                    Flags::USER | Flags::WRITABLE | Flags::NO_EXECUTE,
-                )
-                .is_err()
-        {
-            warn!("syscall: user mapping failed");
-            return;
-        }
-    }
-
-    let entry = UserEntry {
-        rip: USER_CODE_VA,
-        rsp: USER_STACK_VA + hal::paging::PAGE,
-        cap: 7,
-        msg_info: MessageInfo::new(42, 1, 0).bits(),
-        mr: [0x00C0_FFEE, 0, 0, 0],
-    };
-    info!("syscall: entering ring 3 (user stub syscalls in and out)");
-    hal::syscall::enter_user(&BOOT_RETURN, &entry);
-    info!("syscall: back in the boot thread after ring-3 round trip");
-}
-
 /// Bring up preemption (#80): retire the legacy PIC, enable the Local APIC,
 /// calibrate its timer against the PIT, start it at [`TIMER_HZ`] on
 /// [`TIMER_VECTOR`], and enable interrupts on the boot thread. Returns whether
@@ -1000,7 +972,9 @@ fn init_preemption() -> bool {
             warn!("lapic: no address space");
             return false;
         };
-        if aspace.top_level_flags(LAPIC_MMIO_VA).is_some() {
+        // The window's top-level table exists for every kernel slot (see
+        // `populate_higher_half`), so check the page itself is unused.
+        if aspace.translate(LAPIC_MMIO_VA).is_some() {
             warn!("lapic: MMIO window {LAPIC_MMIO_VA:#x} is already in use");
             return false;
         }
