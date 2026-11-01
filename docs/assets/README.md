@@ -6,7 +6,7 @@
 | `brand/banner-{light,dark}.svg` | README header: the tile with the name beneath | `scripts/brand/build_brand.py` |
 | `brand/icon.svg` | Small "Fe" mark for favicons and avatars | `scripts/brand/build_brand.py` |
 | `brand/social-preview.{svg,png}` | 1280×640 GitHub social preview | `scripts/brand/build_brand.py` |
-| `boot-qemu.svg` | A real UEFI boot, rendered from the serial log | `scripts/brand/term_svg.py` |
+| `boot.gif` | A real UEFI boot, recorded from the serial console with real timing | `scripts/brand/boot_gif.sh` |
 | `architecture.svg` | Layer diagram of the kernel | `scripts/brand/arch_svg.py` |
 | `boot-sequence.svg` | Boot flow from firmware to `kmain`'s steps | `scripts/brand/boot_svg.py` |
 | `dev-toolchain.svg`, `interrupt-flow.svg`, `timer-preemption.svg` | Step-by-step flows in the development and interrupts docs | `scripts/brand/flow_svg.py` |
@@ -22,9 +22,9 @@ everywhere without web fonts. To regenerate them you need Python with
 python3 -m venv .venv && .venv/bin/pip install fonttools
 .venv/bin/python scripts/brand/build_brand.py <fonts-dir> docs/assets/brand
 
-# boot capture: boot once to produce the serial log, then render it
-cargo xtask iso && scripts/boot-test.sh uefi
-python3 scripts/brand/term_svg.py build/serial-uefi.log docs/assets/boot-qemu.svg
+# boot recording (needs qemu, agg from asciinema, and ffmpeg); build from a
+# clean tree so the banner's version is not marked dirty
+cargo xtask iso && scripts/brand/boot_gif.sh docs/assets/boot.gif
 
 python3 scripts/brand/arch_svg.py docs/assets/architecture.svg
 python3 scripts/brand/boot_svg.py docs/assets/boot-sequence.svg
