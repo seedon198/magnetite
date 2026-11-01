@@ -4,7 +4,7 @@
 //! [ADR 0019](../../docs/adr/0019-first-user-task.md) decision 6).
 
 use capability::abi::kind_code;
-use capability::{CapId, InvokeOk, Method, ObjectKind, SysError, MSG_REGISTERS};
+use capability::{CapError, CapId, InvokeOk, Method, ObjectKind, SysError, MSG_REGISTERS};
 use sched::ThreadId;
 
 /// The kernel-side capability invocation entry (#57): resolve the invoked
@@ -55,6 +55,13 @@ pub fn invoke(
         }
         Method::UntypedRetype { kind, count, dst } => {
             let (size, align) = kind.fixed_layout().ok_or(InvokeError::Unsupported)?;
+            // Check the destination before taking any memory: a refused retype
+            // must leave the Untyped as it was.
+            match cspace.get(dst) {
+                Err(CapError::Empty) => {}
+                Ok(_) => return Err(InvokeError::Cap(CapError::Occupied)),
+                Err(e) => return Err(InvokeError::Cap(e)),
+            }
             // The Untyped capability points at its control block (an `Untyped`).
             let mut ut = hal::object::load_untyped(cap.object.phys, hhdm);
             let base = hal::object::retype(&mut ut, size, align, count, hhdm)

@@ -58,6 +58,25 @@ fn main() -> ! {
     ));
     let mut ok = true;
 
+    // A refused retype has no effect: sixteen 4 KiB frames into its occupied
+    // CNode slot would use up all 64 KiB if a refusal still took the memory.
+    let frame = kind_code(ObjectKind::Frame);
+    let mut refused = true;
+    for _ in 0..16 {
+        let r = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[frame, 1, sys::CNODE]);
+        refused &= r == Err(SysError::CapOccupied);
+    }
+    let r: Result<(), SysError> = if refused {
+        Err(SysError::CapOccupied)
+    } else {
+        Ok(())
+    };
+    ok &= check(
+        "retype 16 frames into occupied slot 1",
+        r,
+        Err(SysError::CapOccupied),
+    );
+
     // A kernel object it may create and use: a Notification from its Untyped.
     let note = kind_code(ObjectKind::Notification);
     let retype = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[note, 1, NOTE]);
