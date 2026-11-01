@@ -11,8 +11,9 @@
 //! frames; keeping the *policy* here, free of `unsafe`, makes it unit-testable
 //! on the host. See [ADR 0010](../../docs/adr/0010-bitmap-frame-allocator.md).
 //!
-//! The allocator serves single 4 KiB frames. Large-page / DMA-contiguous
-//! allocation is deliberately deferred (ADR 0010).
+//! The allocator serves single 4 KiB frames, plus aligned contiguous runs for
+//! the rare boot-time object that needs one (the root task's 64 KiB Untyped,
+//! ADR 0019). Large-page and DMA allocation are still deferred (ADR 0010).
 
 /// Bytes per physical frame (standard x86-64 4 KiB page).
 pub const FRAME_SIZE: u64 = 4096;
@@ -197,6 +198,30 @@ impl<'a> FrameAllocator<'a> {
         self.mark_used(i);
         self.hint = i + 1;
         Some(PhysFrame::from_index(i))
+    }
+
+    /// Allocate `count` physically contiguous frames whose base is aligned to
+    /// `count` frames, or `None` if `count` is not a power of two or no such
+    /// run is free. Every frame of the run is marked used; the caller frees
+    /// them one by one (or with the HAL's `free_contiguous`).
+    pub fn alloc_contiguous(&mut self, count: usize) -> Option<PhysFrame> {
+        if !count.is_power_of_two() || count > self.free {
+            return None;
+        }
+        let mut base = 0;
+        while base + count <= self.frames {
+            match (base..base + count).rfind(|&i| self.is_used(i)) {
+                // Skip past the used frame, to the next aligned base.
+                Some(used) => base = (used / count + 1) * count,
+                None => {
+                    for i in base..base + count {
+                        self.mark_used(i);
+                    }
+                    return Some(PhysFrame::from_index(base));
+                }
+            }
+        }
+        None
     }
 
     /// Return a previously-allocated frame to the pool.
@@ -438,5 +463,66 @@ mod tests {
         let a = FrameAllocator::new(&mut bitmap, 8, &regions, &[]);
         // [2048, 14336) contains whole frames 1 and 2 only.
         assert_eq!(a.usable_frames(), 2);
+    }
+
+    #[test]
+    fn contiguous_run_is_aligned_and_marked() {
+        let mut bitmap = [0u64; 16];
+        let regions = [usable(0, 4 * MIB)];
+        let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
+        a.alloc().unwrap(); // frame 0 taken: the run cannot start there
+        let base = a.alloc_contiguous(16).unwrap();
+        assert_eq!(base.addr() % (16 * 4096), 0);
+        assert_eq!(base.index(), 16);
+        assert_eq!(a.free_frames(), 1024 - 1 - 16);
+        // None of the run is handed out singly.
+        for _ in 0..1024 - 17 {
+            let f = a.alloc().unwrap();
+            assert!(!(16..32).contains(&f.index()));
+        }
+        assert!(a.alloc().is_none());
+    }
+
+    #[test]
+    fn contiguous_skips_fragmented_runs() {
+        let mut bitmap = [0u64; 1];
+        let regions = [usable(0, 64 * 4096)];
+        let mut a = FrameAllocator::new(&mut bitmap, 64, &regions, &[]);
+        // Take one frame in each of the first three aligned runs of 16.
+        let taken: [usize; 3] = [3, 20, 47];
+        let mut all = [PhysFrame::from_index(0); 64];
+        for (i, slot) in all.iter_mut().enumerate() {
+            *slot = a.alloc().unwrap();
+            assert_eq!(slot.index(), i);
+        }
+        for (i, f) in all.iter().enumerate() {
+            if !taken.contains(&i) {
+                a.free(*f).unwrap();
+            }
+        }
+        assert_eq!(a.alloc_contiguous(16).unwrap().index(), 48);
+    }
+
+    #[test]
+    fn contiguous_none_when_no_run() {
+        let mut bitmap = [0u64; 1];
+        let regions = [usable(0, 32 * 4096)];
+        let mut a = FrameAllocator::new(&mut bitmap, 32, &regions, &[]);
+        let _ = a.alloc(); // frame 0
+        let f = PhysFrame::from_index(16);
+        a.reserve_region(f.addr(), 4096); // frame 16
+        let free = a.free_frames();
+        assert!(a.alloc_contiguous(16).is_none());
+        assert_eq!(a.free_frames(), free);
+    }
+
+    #[test]
+    fn non_power_of_two_is_refused() {
+        let mut bitmap = [0u64; 16];
+        let regions = [usable(0, 4 * MIB)];
+        let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
+        assert!(a.alloc_contiguous(3).is_none());
+        assert!(a.alloc_contiguous(0).is_none());
+        assert_eq!(a.free_frames(), 1024);
     }
 }
