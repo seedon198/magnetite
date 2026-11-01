@@ -57,6 +57,26 @@ pub enum IpcError {
     ReplySlotFull,
     /// The thread this caller was waiting on for a reply exited.
     PeerExited,
+    /// The endpoint slot named is empty, out of range or not an Endpoint.
+    InvalidCap,
+}
+
+impl From<IpcError> for capability::SysError {
+    fn from(e: IpcError) -> Self {
+        use capability::SysError as S;
+        match e {
+            IpcError::MissingRight => S::MissingRight,
+            IpcError::NoGrant => S::NoGrant,
+            IpcError::TooManyCaps => S::TooManyCaps,
+            IpcError::SourceEmpty => S::SourceEmpty,
+            IpcError::NoReceiveSlot => S::NoReceiveSlot,
+            IpcError::ReceiveSlotFull => S::ReceiveSlotFull,
+            IpcError::NoReplySlot => S::NoReplySlot,
+            IpcError::ReplySlotFull => S::ReplySlotFull,
+            IpcError::PeerExited => S::PeerExited,
+            IpcError::InvalidCap => S::InvalidCap,
+        }
+    }
 }
 
 /// Which kind of thread an endpoint's queue holds; never both at once.
@@ -138,6 +158,26 @@ fn decode(w: u64) -> Option<ThreadId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipc_errors_map_to_sys_errors() {
+        use capability::SysError;
+        let pairs = [
+            (IpcError::MissingRight, SysError::MissingRight),
+            (IpcError::NoGrant, SysError::NoGrant),
+            (IpcError::TooManyCaps, SysError::TooManyCaps),
+            (IpcError::SourceEmpty, SysError::SourceEmpty),
+            (IpcError::NoReceiveSlot, SysError::NoReceiveSlot),
+            (IpcError::ReceiveSlotFull, SysError::ReceiveSlotFull),
+            (IpcError::NoReplySlot, SysError::NoReplySlot),
+            (IpcError::ReplySlotFull, SysError::ReplySlotFull),
+            (IpcError::PeerExited, SysError::PeerExited),
+            (IpcError::InvalidCap, SysError::InvalidCap),
+        ];
+        for (ipc, sys) in pairs {
+            assert_eq!(SysError::from(ipc), sys);
+        }
+    }
 
     use capability::{CapError, CapId, CapSpace, Capability, Rights, Slot};
 

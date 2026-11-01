@@ -143,6 +143,7 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // Virtual memory (M2, #39): move onto page tables we own, then self-test
     // the map/translate/unmap path.
     init_paging(boot_info);
+    ipc::init(boot_info.hhdm_offset);
 
     // W^X + NX hardening (M2, #40): enforce per-section kernel permissions and
     // make the direct physical map non-executable.
