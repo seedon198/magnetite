@@ -17,6 +17,10 @@ name = "capability"
 version = "0.0.1"
 
 [[package]]
+name = "elf"
+version = "0.0.1"
+
+[[package]]
 name = "frame-alloc"
 version = "0.0.1"
 
