@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod banner;
 mod boot;
+mod console;
 mod invoke;
 mod ipc;
 mod log;
@@ -845,6 +846,7 @@ fn exit_current() -> ! {
             s.admit(t);
         }
         s.remove(cur);
+        thread::mark_exited(cur);
         // Removing the front makes the next thread in line current.
         s.current().expect("sched: the last runnable thread exited")
     };

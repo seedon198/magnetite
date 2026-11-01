@@ -39,6 +39,22 @@ static SPACES: SpinLock<[Option<AddressSpace>; MAX]> = SpinLock::new([const { No
 static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
 static CURRENT_ROOT: AtomicU64 = AtomicU64::new(0);
 
+/// Threads that have exited, one bit each. A thread blocked in IPC is off the
+/// run queue too, so only this says a thread is gone for good.
+static EXITED: AtomicU64 = AtomicU64::new(0);
+
+const _: () = assert!(MAX <= 64, "thread: EXITED holds one bit per thread");
+
+/// Record that `t` exited (called by the exit path, before it switches away).
+pub fn mark_exited(t: ThreadId) {
+    EXITED.fetch_or(1 << t.0, Ordering::Release);
+}
+
+/// Whether `t` has exited and not yet been reaped.
+pub fn has_exited(t: ThreadId) -> bool {
+    EXITED.load(Ordering::Acquire) & (1 << t.0) != 0
+}
+
 /// Timer preemptions that interrupted ring 3.
 pub static USER_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -110,14 +126,15 @@ pub fn set_kernel_stack(t: ThreadId, slot: usize, top: u64) {
 /// kernel stack. Returns the frames freed.
 ///
 /// # Panics
-/// If `t` is the running thread or still runnable: its stack and address
-/// space may be in use.
+/// If `t` has not exited, or is still on the run queue: a thread blocked in
+/// IPC is off the run queue but still owns its stack and address space.
 pub fn reap(t: ThreadId) -> usize {
-    let live = hal::cpu::without_interrupts(|| {
-        let s = SCHED.lock();
-        s.current() == Some(t) || s.contains(t)
-    });
-    assert!(!live, "thread: reaping live thread {}", t.0);
+    let queued = hal::cpu::without_interrupts(|| SCHED.lock().contains(t));
+    assert!(
+        has_exited(t) && !queued,
+        "thread: reaping live thread {}",
+        t.0
+    );
     let space = hal::cpu::without_interrupts(|| SPACES.lock()[t.0].take());
     let mut freed = space.map_or(0, AddressSpace::destroy_user);
     let slot = STACK_SLOT_OF[t.0].swap(0, Ordering::Relaxed);
@@ -125,6 +142,7 @@ pub fn reap(t: ThreadId) -> usize {
     if slot != 0 {
         freed += free_kernel_stack(slot as usize - 1);
     }
+    EXITED.fetch_and(!(1 << t.0), Ordering::Release);
     freed
 }
 

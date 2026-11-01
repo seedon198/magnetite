@@ -69,7 +69,6 @@ pub fn with_cspace<R>(
 }
 
 /// Take thread `t`'s capability space away (when reaping it).
-#[allow(dead_code)] // used by the root task's reaping (#82, Task 10)
 pub fn take_cspace(t: ThreadId) -> Option<(ObjectRef, CapSpace<'static, ObjectRef>)> {
     hal::cpu::without_interrupts(|| CSPACES.lock()[t.0].take())
 }

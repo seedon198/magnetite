@@ -205,10 +205,7 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     assert!(spawned, "user: could not create the demo threads");
 
     let demo_threads = || (7..=11).map(ThreadId);
-    while hal::cpu::without_interrupts(|| {
-        let s = SCHED.lock();
-        demo_threads().any(|t| s.contains(t))
-    }) {
+    while !demo_threads().all(thread::has_exited) {
         crate::yield_now();
     }
 
