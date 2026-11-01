@@ -16,6 +16,7 @@ mod banner;
 mod boot;
 mod ipc;
 mod log;
+mod task;
 mod thread;
 mod user;
 
@@ -198,6 +199,9 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // User threads (M4, #82): each in its own address space with its own
     // kernel stack, preempted in ring 3; a fault in ring 3 ends only the task.
     user::demo(boot_info, preemptive);
+
+    // The first user programs (#82, ADR 0019): loaded from boot modules.
+    task::demo(boot_info);
 
     // Exercise the trap path end to end: a breakpoint (#BP) is a recoverable
     // trap, so the handler prints a report and execution resumes here.
