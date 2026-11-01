@@ -16,11 +16,12 @@ use hal::paging::{AddressSpace, Flags, PAGE};
 use hal::sync::SpinLock;
 use sched::ThreadId;
 
-use crate::KERNEL_SPACE;
+use crate::{KERNEL_SPACE, SCHED};
 
 /// Thread slots: boot (0), cooperative workers (1, 2), preemption spinners
-/// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11).
-pub const MAX: usize = 12;
+/// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11), the
+/// console server (12), the fault task (13) and the root task (14).
+pub const MAX: usize = 16;
 
 /// Saved contexts, indexed by [`ThreadId`].
 pub static CONTEXTS: [Context; MAX] = [const { Context::new() }; MAX];
@@ -28,12 +29,31 @@ pub static CONTEXTS: [Context; MAX] = [const { Context::new() }; MAX];
 /// Each thread's kernel stack top (0 = runs on the stack it was started on).
 static KSTACK_TOP: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 
+/// Each thread's kernel-stack window slot, plus one (0 = none), for reaping.
+static STACK_SLOT_OF: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
+
 /// Each thread's own address space; `None` runs in the kernel's.
 static SPACES: SpinLock<[Option<AddressSpace>; MAX]> = SpinLock::new([const { None }; MAX]);
 
 /// The kernel address space's root, and the root currently in `CR3`.
 static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
 static CURRENT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Threads that have exited, one bit each. A thread blocked in IPC is off the
+/// run queue too, so only this says a thread is gone for good.
+static EXITED: AtomicU64 = AtomicU64::new(0);
+
+const _: () = assert!(MAX <= 64, "thread: EXITED holds one bit per thread");
+
+/// Record that `t` exited (called by the exit path, before it switches away).
+pub fn mark_exited(t: ThreadId) {
+    EXITED.fetch_or(1 << t.0, Ordering::Release);
+}
+
+/// Whether `t` has exited and not yet been reaped.
+pub fn has_exited(t: ThreadId) -> bool {
+    EXITED.load(Ordering::Acquire) & (1 << t.0) != 0
+}
 
 /// Timer preemptions that interrupted ring 3.
 pub static USER_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
@@ -73,9 +93,57 @@ pub fn alloc_kernel_stack(slot: usize) -> Option<u64> {
     })
 }
 
-/// Give thread `t` its own kernel stack, used for every ring-3 entry.
-pub fn set_kernel_stack(t: ThreadId, top: u64) {
+/// Unmap the kernel stack in window slot `slot` and free its frames. The
+/// guard page below it was never mapped.
+pub fn free_kernel_stack(slot: usize) -> usize {
+    let bottom = KSTACK_BASE + slot as u64 * KSTACK_SLOT + PAGE;
+    hal::cpu::without_interrupts(|| {
+        let mut guard = KERNEL_SPACE.lock();
+        let Some(space) = guard.as_mut() else {
+            return 0;
+        };
+        let mut freed = 0;
+        for page in 0..KSTACK_BYTES / PAGE {
+            let va = bottom + page * PAGE;
+            if let Some(phys) = space.translate(va) {
+                space.unmap(va);
+                hal::frame::free_frame(hal::frame::PhysFrame::containing(phys));
+                freed += 1;
+            }
+        }
+        freed
+    })
+}
+
+/// Give thread `t` its own kernel stack, from window slot `slot`, used for
+/// every ring-3 entry.
+pub fn set_kernel_stack(t: ThreadId, slot: usize, top: u64) {
+    STACK_SLOT_OF[t.0].store(slot as u64 + 1, Ordering::Relaxed);
     KSTACK_TOP[t.0].store(top, Ordering::Relaxed);
+}
+
+/// Reclaim an exited thread `t`: tear down its address space and free its
+/// kernel stack. Returns the frames freed.
+///
+/// # Panics
+/// If `t` has not exited, or is still on the run queue: a thread blocked in
+/// IPC is off the run queue but still owns its stack and address space.
+pub fn reap(t: ThreadId) -> usize {
+    let queued = hal::cpu::without_interrupts(|| SCHED.lock().contains(t));
+    assert!(
+        has_exited(t) && !queued,
+        "thread: reaping live thread {}",
+        t.0
+    );
+    let space = hal::cpu::without_interrupts(|| SPACES.lock()[t.0].take());
+    let mut freed = space.map_or(0, AddressSpace::destroy_user);
+    let slot = STACK_SLOT_OF[t.0].swap(0, Ordering::Relaxed);
+    KSTACK_TOP[t.0].store(0, Ordering::Relaxed);
+    if slot != 0 {
+        freed += free_kernel_stack(slot as usize - 1);
+    }
+    EXITED.fetch_and(!(1 << t.0), Ordering::Release);
+    freed
 }
 
 /// Give thread `t` its own address space.

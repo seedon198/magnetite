@@ -53,10 +53,17 @@ Each user task has its own PML4 ([ADR 0019](../adr/0019-first-user-task.md)).
 Its kernel half (entries 256 to 511) is copied from the kernel's, and every one
 of those entries is populated once at boot, so anything the kernel maps later
 lands in tables all spaces share. The kernel half is supervisor-only: a user
-access faults and ends the task. Today a user thread maps its code read and
-execute at `0x400000`, and a one-page stack read and write, never execute, at
-`0x7ffff000`, with the page below it left unmapped as a guard. No page is both
-writable and executable.
+access faults and ends the task.
+
+A user program is a static ELF executable linked at `0x400000` (`user/link.ld`).
+The kernel validates it (`libs/elf`) and maps each segment's pages with exactly
+its permissions: text read and execute, read-only data read only, data and bss
+read and write, never execute. Its stack is four pages, read and write, never
+execute, ending at `0x7fff_ffff_0000`, with the page below left unmapped as a
+guard; segments must end below that guard. No page is both writable and
+executable, and the top user page (`USER_TOP`) is never mappable. When a task
+ends, every frame of its user half, its page tables and its kernel stack are
+freed (`AddressSpace::destroy_user`, `thread::reap`).
 
 ## Isolation
 

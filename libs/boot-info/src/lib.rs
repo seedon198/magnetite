@@ -136,6 +136,28 @@ impl<const N: usize> ShortStr<N> {
     }
 }
 
+/// The most boot modules recorded.
+pub const MAX_MODULES: usize = 4;
+
+/// A file the bootloader loaded alongside the kernel (a user program, #82).
+#[derive(Clone, Copy)]
+pub struct Module {
+    /// Where its bytes start, as a virtual address in the HHDM.
+    pub address: u64,
+    /// Its size in bytes.
+    pub size: u64,
+    /// The last component of its path (e.g. `root`).
+    pub name: ShortStr<32>,
+}
+
+impl Module {
+    const EMPTY: Self = Self {
+        address: 0,
+        size: 0,
+        name: ShortStr::EMPTY,
+    };
+}
+
 /// Information handed from the boot code to `kmain`.
 #[derive(Clone, Copy)]
 pub struct BootInfo {
@@ -155,6 +177,8 @@ pub struct BootInfo {
     pub bootloader_version: ShortStr<32>,
     regions: [MemoryRegion; MAX_MEMORY_REGIONS],
     region_count: usize,
+    modules: [Module; MAX_MODULES],
+    module_count: usize,
 }
 
 impl Default for BootInfo {
@@ -177,6 +201,8 @@ impl BootInfo {
             bootloader_version: ShortStr::EMPTY,
             regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
             region_count: 0,
+            modules: [Module::EMPTY; MAX_MODULES],
+            module_count: 0,
         }
     }
 
@@ -189,6 +215,29 @@ impl BootInfo {
         self.regions[self.region_count] = region;
         self.region_count += 1;
         true
+    }
+
+    /// Append a boot module. Returns `false` if the table is full (the module
+    /// is dropped).
+    pub fn push_module(&mut self, module: Module) -> bool {
+        if self.module_count >= MAX_MODULES {
+            return false;
+        }
+        self.modules[self.module_count] = module;
+        self.module_count += 1;
+        true
+    }
+
+    /// The recorded boot modules.
+    #[must_use]
+    pub fn modules(&self) -> &[Module] {
+        &self.modules[..self.module_count]
+    }
+
+    /// The boot module called `name`, if the bootloader loaded one.
+    #[must_use]
+    pub fn module(&self, name: &str) -> Option<&Module> {
+        self.modules().iter().find(|m| m.name.as_str() == name)
     }
 
     /// The recorded memory regions.
@@ -236,6 +285,29 @@ impl BootInfo {
 
 #[cfg(test)]
 mod tests {
+    fn module(name: &str, address: u64) -> Module {
+        Module {
+            address,
+            size: 0x1000,
+            name: ShortStr::new(name),
+        }
+    }
+
+    #[test]
+    fn module_lookup_by_name() {
+        let mut info = BootInfo::new();
+        assert!(info.push_module(module("root", 0x1000)));
+        assert!(info.push_module(module("fault", 0x2000)));
+        assert_eq!(info.module("fault").map(|m| m.address), Some(0x2000));
+        assert_eq!(info.module("root").map(|m| m.address), Some(0x1000));
+        assert!(info.module("init").is_none());
+        assert_eq!(info.modules().len(), 2);
+        assert!(info.push_module(module("c", 0x3000)));
+        assert!(info.push_module(module("d", 0x4000)));
+        assert!(!info.push_module(module("e", 0x5000)), "a fifth module fit");
+        assert_eq!(info.modules().len(), MAX_MODULES);
+    }
+
     use super::*;
 
     fn region(base: u64, length: u64, kind: RegionKind) -> MemoryRegion {

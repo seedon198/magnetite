@@ -29,22 +29,48 @@ use crate::SCHED;
 /// Every thread's IPC state.
 static IPC: SpinLock<Ipc> = SpinLock::new(Ipc::new());
 
-/// Each thread's capability space, formed once over its CNode. Never re-form a
-/// live one: `hal::object::cnode_cap_space` clears the CNode it wraps.
-static CSPACES: SpinLock<[Option<CapSpace<'static, ObjectRef>>; ::ipc::MAX_THREADS]> =
+/// A thread's capability space, formed once over its CNode, and that CNode.
+type CSpace = (ObjectRef, CapSpace<'static, ObjectRef>);
+
+/// Each thread's capability space. Never re-form a live one:
+/// `hal::object::cnode_cap_space` clears the CNode it wraps.
+static CSPACES: SpinLock<[Option<CSpace>; ::ipc::MAX_THREADS]> =
     SpinLock::new([const { None }; ::ipc::MAX_THREADS]);
 
 /// The HHDM offset, for reaching endpoint state.
 static HHDM: AtomicU64 = AtomicU64::new(0);
 
-/// The HHDM offset recorded at IPC set-up.
+/// Record the HHDM offset. Call once during init, before any IPC.
+pub fn init(hhdm: u64) {
+    HHDM.store(hhdm, Ordering::Relaxed);
+}
+
+/// The HHDM offset recorded by [`init`].
 pub fn hhdm() -> u64 {
     HHDM.load(Ordering::Relaxed)
 }
 
-/// Give thread `t` its capability space.
-pub fn set_cspace(t: ThreadId, space: CapSpace<'static, ObjectRef>) {
-    hal::cpu::without_interrupts(|| CSPACES.lock()[t.0] = Some(space));
+/// Give thread `t` its capability space, formed over the CNode `cnode`.
+pub fn set_cspace(t: ThreadId, cnode: ObjectRef, space: CapSpace<'static, ObjectRef>) {
+    hal::cpu::without_interrupts(|| CSPACES.lock()[t.0] = Some((cnode, space)));
+}
+
+/// Run `f` on thread `t`'s capability space and its CNode, with interrupts
+/// off and `CSPACES` held. `None` if `t` has no capability space.
+pub fn with_cspace<R>(
+    t: ThreadId,
+    f: impl FnOnce(&mut CapSpace<'static, ObjectRef>, ObjectRef) -> R,
+) -> Option<R> {
+    hal::cpu::without_interrupts(|| {
+        let mut spaces = CSPACES.lock();
+        let (cnode, space) = spaces[t.0].as_mut()?;
+        Some(f(space, *cnode))
+    })
+}
+
+/// Take thread `t`'s capability space away (when reaping it).
+pub fn take_cspace(t: ThreadId) -> Option<(ObjectRef, CapSpace<'static, ObjectRef>)> {
+    hal::cpu::without_interrupts(|| CSPACES.lock()[t.0].take())
 }
 
 /// Send `msg` through the endpoint capability in slot `ep`, with the
@@ -79,6 +105,20 @@ pub fn recv(ep: CapId, recv_slot: Option<CapId>) -> Result<Received, IpcError> {
     .map(|r| r.expect("ipc: a completed receive carries the message"))
 }
 
+/// Answer the caller in this thread's reply slot (if it holds one), then block
+/// for the next message through `ep`, as one operation: a server's loop.
+pub fn reply_recv(
+    ep: CapId,
+    msg: Message,
+    cap: Option<CapId>,
+    recv_slot: Option<CapId>,
+) -> Result<Received, IpcError> {
+    invoke(Some(ep), |ipc, caps, q, me, rights, _| {
+        ipc.reply_recv(caps, q, me, rights, msg, cap, recv_slot)
+    })
+    .map(|r| r.expect("ipc: a completed receive carries the message"))
+}
+
 /// Answer the caller in this thread's reply slot.
 pub fn reply(msg: Message, cap: Option<CapId>) -> Result<(), IpcError> {
     invoke(None, |ipc, caps, _, me, _, _| ipc.reply(caps, me, msg, cap)).map(|_| ())
@@ -92,13 +132,17 @@ pub fn exit_thread(t: ThreadId) -> Outcome {
 }
 
 /// The capability spaces as the engine sees them.
-struct Spaces<'a>(&'a mut [Option<CapSpace<'static, ObjectRef>>; ::ipc::MAX_THREADS]);
+struct Spaces<'a>(&'a mut [Option<CSpace>; ::ipc::MAX_THREADS]);
 
 impl CapAccess for Spaces<'_> {
     type Obj = ObjectRef;
 
     fn get(&mut self, t: ThreadId, slot: CapId) -> Result<Capability<ObjectRef>, CapError> {
-        self.0[t.0].as_ref().ok_or(CapError::OutOfRange)?.get(slot)
+        self.0[t.0]
+            .as_ref()
+            .ok_or(CapError::OutOfRange)?
+            .1
+            .get(slot)
     }
 
     fn is_empty(&mut self, t: ThreadId, slot: CapId) -> bool {
@@ -114,6 +158,7 @@ impl CapAccess for Spaces<'_> {
         self.0[t.0]
             .as_mut()
             .ok_or(CapError::OutOfRange)?
+            .1
             .insert_at(slot, cap)
     }
 }
@@ -135,9 +180,9 @@ fn invoke(
             let mut caps = Spaces(&mut spaces);
             let (phys, rights, badge) = match ep {
                 Some(slot) => {
-                    let cap = caps.get(me, slot).map_err(|_| IpcError::MissingRight)?;
+                    let cap = caps.get(me, slot).map_err(|_| IpcError::InvalidCap)?;
                     if cap.object.kind != ObjectKind::Endpoint {
-                        return Err(IpcError::MissingRight);
+                        return Err(IpcError::InvalidCap);
                     }
                     (Some(cap.object.phys), cap.rights, cap.badge)
                 }
@@ -197,7 +242,6 @@ pub fn demo(boot_info: &BootInfo) {
 
     const SLOTS: usize = 16;
     let hhdm = boot_info.hhdm_offset;
-    HHDM.store(hhdm, Ordering::Relaxed);
 
     let (Some(objects), Some(page)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame()) else {
         crate::warn!("ipc: no frames for the demo");
@@ -238,8 +282,8 @@ pub fn demo(boot_info: &BootInfo) {
     client
         .insert_at(CapId(2), Capability::new(frame, frame_rights))
         .unwrap();
-    set_cspace(SERVER, server);
-    set_cspace(CLIENT, client);
+    set_cspace(SERVER, ObjectRef::new(ObjectKind::CNode, srv), server);
+    set_cspace(CLIENT, ObjectRef::new(ObjectKind::CNode, cli), client);
 
     let threads: [(ThreadId, extern "C" fn() -> !); 2] =
         [(SERVER, ipc_server), (CLIENT, ipc_client)];
@@ -261,7 +305,7 @@ pub fn demo(boot_info: &BootInfo) {
     // still empty, while the frame from the call sits in the first.
     let (first, second) = hal::cpu::without_interrupts(|| {
         let spaces = CSPACES.lock();
-        let s = spaces[SERVER.0].as_ref().unwrap();
+        let s = &spaces[SERVER.0].as_ref().unwrap().1;
         (s.get(CapId(5)), s.get(CapId(6)))
     });
     assert!(
@@ -278,9 +322,9 @@ pub fn demo(boot_info: &BootInfo) {
 
 extern "C" fn ipc_server() -> ! {
     let r = recv(CapId(0), Some(CapId(5))).expect("ipc: server receive");
-    let cap =
-        hal::cpu::without_interrupts(|| CSPACES.lock()[SERVER.0].as_ref().unwrap().get(CapId(5)))
-            .expect("ipc: server received a capability");
+    let cap = with_cspace(SERVER, |s, _| s.get(CapId(5)))
+        .and_then(Result::ok)
+        .expect("ipc: server received a capability");
     crate::info!(
         "ipc: server got label={} mr={:?} badge={} cap={:?} rights={}",
         r.info.label(),
@@ -293,9 +337,8 @@ extern "C" fn ipc_server() -> ! {
         info: MessageInfo::new(1, 1, 0),
         mr: [10, 0, 0, 0],
     };
-    reply(answer, None).expect("ipc: server reply");
-
-    let r = recv(CapId(0), Some(CapId(6))).expect("ipc: server second receive");
+    // Answer, and wait for the next message, in one step.
+    let r = reply_recv(CapId(0), answer, None, Some(CapId(6))).expect("ipc: server reply_recv");
     crate::info!(
         "ipc: server got label={} badge={} caps={}",
         r.info.label(),
@@ -330,6 +373,13 @@ extern "C" fn ipc_client() -> ! {
         info: MessageInfo::new(3, 0, 0),
         mr: [0; 4],
     };
+    let empty = send(CapId(3), plain, None);
+    assert_eq!(
+        empty,
+        Err(IpcError::InvalidCap),
+        "ipc: an empty slot was not InvalidCap"
+    );
+    crate::info!("ipc: send through an empty slot failed: InvalidCap");
     send(CapId(1), plain, None).expect("ipc: client plain send");
     IPC_DONE.fetch_add(1, Ordering::Release);
     crate::exit_current()

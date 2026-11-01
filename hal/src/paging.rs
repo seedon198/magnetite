@@ -151,6 +151,54 @@ impl AddressSpace {
         true
     }
 
+    /// Tear down a user address space: free every frame mapped in its user
+    /// half (entries 0 to 255), every table below them, and the root. The
+    /// kernel half's tables are shared with every space and are never touched.
+    /// Returns the number of frames freed.
+    ///
+    /// Every user-half frame is the task's own (nothing is shared between
+    /// tasks yet), so freeing them is sound once no thread runs in this space.
+    ///
+    /// # Panics
+    /// If this space is the one in `CR3`.
+    pub fn destroy_user(self) -> usize {
+        assert!(
+            read_cr3() & !0xfff != self.root.addr(),
+            "paging: destroying the active address space"
+        );
+        let mut freed = 0;
+        for i in 0..HIGHER_HALF_START {
+            if let Some(pdpt) = self.next_table(self.root.addr(), i) {
+                freed += self.free_subtree(pdpt, 2);
+            }
+        }
+        frame::free_frame(self.root);
+        freed + 1
+    }
+
+    /// Free the table at `table_phys` and everything below it. `level` 2 is a
+    /// PDPT, 1 a page directory, 0 a page table, whose present entries are
+    /// leaf frames. A user half holds no huge mappings (`map` makes only
+    /// 4 KiB pages), so a huge entry is a kernel bug.
+    fn free_subtree(&self, table_phys: u64, level: u8) -> usize {
+        let mut freed = 0;
+        for i in 0..ENTRY_COUNT {
+            let e = self.entry(table_phys, i);
+            if !e.is_present() {
+                continue;
+            }
+            assert!(!e.is_huge(), "paging: huge mapping in a user half");
+            freed += if level == 0 {
+                frame::free_frame(PhysFrame::containing(e.addr()));
+                1
+            } else {
+                self.free_subtree(e.addr(), level - 1)
+            };
+        }
+        frame::free_frame(PhysFrame::containing(table_phys));
+        freed + 1
+    }
+
     /// The physical address of this space's root table, to tell spaces apart.
     #[must_use]
     pub fn root_phys(&self) -> u64 {

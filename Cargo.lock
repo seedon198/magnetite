@@ -17,6 +17,10 @@ name = "capability"
 version = "0.0.1"
 
 [[package]]
+name = "elf"
+version = "0.0.1"
+
+[[package]]
 name = "frame-alloc"
 version = "0.0.1"
 
@@ -43,6 +47,7 @@ version = "0.0.1"
 dependencies = [
  "boot-info",
  "capability",
+ "elf",
  "hal",
  "ipc",
  "limine",
@@ -65,6 +70,27 @@ version = "0.0.1"
 [[package]]
 name = "sched"
 version = "0.0.1"
+
+[[package]]
+name = "sys"
+version = "0.0.1"
+dependencies = [
+ "capability",
+]
+
+[[package]]
+name = "user-fault"
+version = "0.0.1"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "user-root"
+version = "0.0.1"
+dependencies = [
+ "sys",
+]
 
 [[package]]
 name = "xtask"

@@ -1,0 +1,17 @@
+[package]
+name = "user-fault"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Magnetite user program: fault (#82)."
+publish = false
+
+[[bin]]
+name = "fault"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+sys = { path = "../../libs/sys" }

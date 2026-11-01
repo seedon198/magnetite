@@ -20,22 +20,24 @@ fail=0
 #   - the `hal` crate (hardware access)
 #   - the kernel's `boot` module (bootloader + linker glue: the entry point and
 #     Limine request placement)
+#   - `libs/sys` (the user side of `syscall` and the user entry point; it runs
+#     only in ring 3; ADR 0007's 2026-11-01 amendment)
 # See docs/adr/0007-unsafe-policy.md.
-is_trusted() { [[ "$1" == hal/* || "$1" == kernel/src/boot/* ]]; }
+is_trusted() { [[ "$1" == hal/* || "$1" == kernel/src/boot/* || "$1" == libs/sys/* ]]; }
 
 # Find every `allow(unsafe_code)` ATTRIBUTE (inner or outer), ignoring mentions
 # inside comments/docs by requiring the line to start (after optional
 # whitespace) with the attribute form `#[...]` / `#![...]`.
 mapfile -t allow_hits < <(
   grep -REn --include='*.rs' '^[[:space:]]*#!?\[[[:space:]]*allow\([[:space:]]*unsafe_code[[:space:]]*\)' \
-    kernel libs xtask servers runtime tools 2>/dev/null || true
+    kernel libs user xtask servers runtime tools 2>/dev/null || true
 )
 
 for hit in "${allow_hits[@]:-}"; do
   [[ -z "$hit" ]] && continue
   file="${hit%%:*}"
   if is_trusted "$file"; then continue; fi
-  echo "DENIED: allow(unsafe_code) outside hal/ and kernel/src/boot/:"
+  echo "DENIED: allow(unsafe_code) outside hal/, kernel/src/boot/ and libs/sys/:"
   echo "  $hit"
   fail=1
 done
@@ -49,7 +51,7 @@ while IFS= read -r root; do
     echo "DENIED: crate root does not #![forbid]/#![deny](unsafe_code): $root"
     fail=1
   fi
-done < <(find kernel libs xtask servers runtime tools \( -name lib.rs -o -name main.rs \) 2>/dev/null)
+done < <(find kernel libs user xtask servers runtime tools \( -name lib.rs -o -name main.rs \) 2>/dev/null)
 
 if [[ "$fail" -ne 0 ]]; then
   echo
@@ -57,4 +59,4 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
-echo "unsafe-code policy OK: unsafe confined to hal/ and kernel/src/boot/"
+echo "unsafe-code policy OK: unsafe confined to hal/, kernel/src/boot/ and libs/sys/"

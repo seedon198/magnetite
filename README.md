@@ -28,10 +28,11 @@
 > [!WARNING]
 > **Pre-alpha.** Magnetite boots on x86-64 (UEFI and BIOS) in QEMU with its own
 > CPU tables, memory management and hardening, a capability model, threads,
-> and a ring-3 syscall boundary
+> synchronous IPC, and its first user programs: separately built tasks running
+> in ring 3, confined to the capabilities they are given
 > ([v0.3.0](https://github.com/seedon198/magnetite/releases/tag/v0.3.0), with
-> M4 under way). IPC, user-space servers and the security tooling are still
-> ahead. For authorized security research and testing only.
+> M4 under way). User-space servers and the security tooling are still ahead.
+> For authorized security research and testing only.
 
 <p align="center">
   <img src="docs/assets/boot.gif" alt="Magnetite booting in QEMU: the boot banner, system summary and serial log, recorded from a real UEFI boot" width="820">

@@ -8,7 +8,7 @@
 //!
 //! Commands:
 //! - `test`                     run the host workspace tests
-//! - `build`                    cross-compile the kernel
+//! - `build`                    cross-compile the kernel and the user programs
 //! - `iso`                      build `build/kernel.iso`
 //! - `run [--bios|--kvm] [-- <qemu args>]`    build the ISO and boot in QEMU
 //! - `debug [--bios|--kvm] [-- <qemu args>]`  boot paused with a GDB stub
@@ -22,6 +22,20 @@ const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Pinned Limine release. The binary distribution is published on per-major
 /// branches; `v11.x-binary` is the latest prebuilt branch (v12 is source-only).
 /// See docs/adr/0003-bootloader.md.
+/// User programs loaded as Limine boot modules (#82, ADR 0019): (package,
+/// binary). Each lands at `/boot/<binary>` on the ISO.
+const USER_PROGRAMS: &[(&str, &str)] = &[("user-root", "root"), ("user-fault", "fault")];
+
+/// Link flags for user programs: a static, non-PIE executable laid out by
+/// `user/link.ld`. Passed as `CARGO_ENCODED_RUSTFLAGS`, which replaces the
+/// kernel's target flags from `.cargo/config.toml` (PIE, the kernel's linker
+/// script) for this build only.
+const USER_RUSTFLAGS: &[&str] = &[
+    "-Crelocation-model=static",
+    "-Clink-arg=-Tuser/link.ld",
+    "-Clink-arg=--no-pie",
+];
+
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
 const LIMINE_BRANCH: &str = "v11.x-binary";
 
@@ -33,6 +47,7 @@ fn main() {
         "test" => run(&cargo(), &["test"]),
         "build" => {
             build();
+            build_user();
         }
         "iso" => {
             iso();
@@ -86,6 +101,39 @@ fn cargo() -> String {
 }
 
 /// Cross-compile the kernel and return the path to the resulting ELF.
+/// Build the user programs into `target/user` (a separate target directory,
+/// so their flags never invalidate the kernel's build). Returns each
+/// program's (binary name, ELF path).
+fn build_user() -> Vec<(&'static str, PathBuf)> {
+    let mut args = vec!["build", "--release", "--target", KERNEL_TARGET];
+    args.extend(["--target-dir", "target/user"]);
+    for (package, _) in USER_PROGRAMS {
+        args.extend(["--package", package]);
+    }
+    let status = Command::new(cargo())
+        .args(&args)
+        .env("CARGO_ENCODED_RUSTFLAGS", USER_RUSTFLAGS.join("\x1f"))
+        .status()
+        .unwrap_or_else(|e| fail(&format!("failed to run cargo: {e}")));
+    if !status.success() {
+        fail("building the user programs failed");
+    }
+    USER_PROGRAMS
+        .iter()
+        .map(|&(_, bin)| {
+            let elf = PathBuf::from("target/user")
+                .join(KERNEL_TARGET)
+                .join("release")
+                .join(bin);
+            if !elf.exists() {
+                fail(&format!("expected user program at {}", elf.display()));
+            }
+            println!("user program built: {}", elf.display());
+            (bin, elf)
+        })
+        .collect()
+}
+
 fn build() -> PathBuf {
     run(
         &cargo(),
@@ -138,6 +186,7 @@ fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) {
 /// Build a bootable ISO (BIOS + UEFI) at `build/kernel.iso`.
 fn iso() {
     let kernel = build();
+    let users = build_user();
     let limine = fetch_limine();
 
     // Lay out the ISO root.
@@ -145,6 +194,9 @@ fn iso() {
     let _ = std::fs::remove_dir_all(&root);
     copy(&kernel, root.join("boot/kernel"));
     copy("boot/limine.conf", root.join("boot/limine/limine.conf"));
+    for (bin, elf) in &users {
+        copy(elf, root.join("boot").join(bin));
+    }
     for f in [
         "limine-bios.sys",
         "limine-bios-cd.bin",

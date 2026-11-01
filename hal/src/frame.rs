@@ -83,6 +83,23 @@ pub fn alloc_frame() -> Option<PhysFrame> {
     Some(frame)
 }
 
+/// Allocate `count` contiguous zeroed frames, aligned to `count` frames
+/// (`count` a power of two). Returns the first frame, or `None`.
+pub fn alloc_contiguous(count: usize) -> Option<PhysFrame> {
+    let base = ALLOCATOR.lock().as_mut()?.alloc_contiguous(count)?;
+    for i in 0..count {
+        zero_frame(PhysFrame::from_index(base.index() + i));
+    }
+    Some(base)
+}
+
+/// Return a run from [`alloc_contiguous`] to the pool.
+pub fn free_contiguous(base: PhysFrame, count: usize) {
+    for i in 0..count {
+        free_frame(PhysFrame::from_index(base.index() + i));
+    }
+}
+
 /// Return a frame to the pool.
 ///
 /// # Panics

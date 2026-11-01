@@ -14,8 +14,12 @@ extern crate alloc;
 
 mod banner;
 mod boot;
+mod console;
+mod invoke;
 mod ipc;
 mod log;
+mod syscall;
+mod task;
 mod thread;
 mod user;
 
@@ -143,6 +147,8 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // Virtual memory (M2, #39): move onto page tables we own, then self-test
     // the map/translate/unmap path.
     init_paging(boot_info);
+    ipc::init(boot_info.hhdm_offset);
+    check_modules(boot_info);
 
     // W^X + NX hardening (M2, #40): enforce per-section kernel permissions and
     // make the direct physical map non-executable.
@@ -195,7 +201,15 @@ fn kmain(boot_info: &BootInfo) -> ! {
 
     // User threads (M4, #82): each in its own address space with its own
     // kernel stack, preempted in ring 3; a fault in ring 3 ends only the task.
+    // The system-call boundary (#82, ADR 0019): every ring-3 entry to the
+    // kernel goes through `syscall::handle` or the user-fault hook.
+    hal::syscall::init();
+    hal::syscall::register(syscall::handle);
+    hal::idt::register_user_fault(user::user_fault);
     user::demo(boot_info, preemptive);
+
+    // The first user programs (#82, ADR 0019): loaded from boot modules.
+    task::demo(boot_info);
 
     // Exercise the trap path end to end: a breakpoint (#BP) is a recoverable
     // trap, so the handler prints a report and execution resumes here.
@@ -222,6 +236,38 @@ fn kmain(boot_info: &BootInfo) -> ! {
 
 /// Bring up the physical frame allocator from the boot memory map and exercise
 /// it with a small alloc/free smoke test.
+/// The user programs (#82) must have been loaded, and their memory must never
+/// be handed out: it lies outside every usable region (Limine reports it as
+/// `KernelAndModules`).
+fn check_modules(boot_info: &BootInfo) {
+    for name in ["root", "fault"] {
+        // A missing or malformed program is not fatal (ADR 0019 decision 1):
+        // the loader refuses it later and the kernel boots on without it.
+        let Some(m) = boot_info.module(name) else {
+            warn!("boot: module {name} missing");
+            continue;
+        };
+        let phys = m.address - boot_info.hhdm_offset;
+        let end = phys + m.size;
+        let overlaps_usable = boot_info.regions().iter().any(|r| {
+            r.kind == boot_info::RegionKind::Usable && phys < r.base + r.length && r.base < end
+        });
+        assert!(
+            !overlaps_usable,
+            "boot: module {name} lies in usable memory"
+        );
+        if !boot::module_bytes(m).starts_with(b"\x7fELF") {
+            warn!("boot: module {name} is not an ELF file");
+        }
+    }
+    let size = |name| boot_info.module(name).map_or(0, |m| m.size);
+    info!(
+        "boot: modules root ({} bytes), fault ({} bytes)",
+        size("root"),
+        size("fault")
+    );
+}
+
 fn init_frames(boot_info: &BootInfo) {
     use boot_info::RegionKind;
     use hal::frame::Region;
@@ -644,69 +690,6 @@ fn demo_capabilities(boot_info: &BootInfo) {
     hal::frame::free_frame(frame);
 }
 
-/// The kernel-side capability invocation entry (#57): resolve the invoked
-/// capability in `cspace`, authorize it (kind + rights), then perform the
-/// method's effect. M4's ring-3 `syscall` entry decodes raw register arguments
-/// into a [`Method`] and calls this.
-///
-/// CNode methods act on the acting `cspace` (M3 has a single cap space; M4
-/// generalizes to resolving the target CNode from the invoked capability).
-fn invoke(
-    cspace: &mut capability::CapSpace<capability::ObjectRef>,
-    invoked: capability::CapId,
-    method: capability::Method,
-    hhdm: u64,
-) -> Result<capability::InvokeOk, capability::InvokeError> {
-    use capability::{Capability, InvokeError, InvokeOk, Method, ObjectRef, Rights};
-
-    let cap = cspace.get(invoked).map_err(InvokeError::Cap)?;
-    method.authorize(&cap)?;
-
-    match method {
-        Method::CNodeCopy { src, dst, rights } => {
-            cspace.copy(src, dst, rights).map_err(InvokeError::Cap)?;
-            Ok(InvokeOk::Done)
-        }
-        Method::CNodeMint {
-            src,
-            dst,
-            rights,
-            badge,
-        } => {
-            cspace
-                .mint(src, dst, rights, badge)
-                .map_err(InvokeError::Cap)?;
-            Ok(InvokeOk::Done)
-        }
-        Method::CNodeMove { src, dst } => {
-            cspace.move_cap(src, dst).map_err(InvokeError::Cap)?;
-            Ok(InvokeOk::Done)
-        }
-        Method::CNodeDelete { id } => {
-            cspace.delete(id).map_err(InvokeError::Cap)?;
-            Ok(InvokeOk::Done)
-        }
-        Method::FrameIdentify => Ok(InvokeOk::Phys(cap.object.phys)),
-        Method::NotificationSignal { bits } => {
-            hal::object::notification_signal(cap.object.phys, bits, hhdm);
-            Ok(InvokeOk::Done)
-        }
-        Method::UntypedRetype { kind, count, dst } => {
-            let (size, align) = kind.fixed_layout().ok_or(InvokeError::Unsupported)?;
-            // The Untyped capability points at its control block (an `Untyped`).
-            let mut ut = hal::object::load_untyped(cap.object.phys, hhdm);
-            let base = hal::object::retype(&mut ut, size, align, count, hhdm)
-                .ok_or(InvokeError::OutOfMemory)?;
-            hal::object::store_untyped(cap.object.phys, hhdm, ut);
-            let obj = ObjectRef::new(kind, base);
-            cspace
-                .insert_at(dst, Capability::new(obj, Rights::ALL))
-                .map_err(InvokeError::Cap)?;
-            Ok(InvokeOk::Created(obj))
-        }
-    }
-}
-
 /// Exercise the invocation API end to end (#57): retype a Frame from an Untyped
 /// *through* `invoke`, identify it, show a rights-denied invocation, and signal
 /// a Notification.
@@ -769,7 +752,7 @@ fn demo_invoke(boot_info: &BootInfo) {
         .unwrap();
 
     // 1) Retype a Frame from the Untyped, through invoke.
-    let created = invoke(
+    let created = invoke::invoke(
         &mut cs,
         ut_id,
         Method::UntypedRetype {
@@ -790,12 +773,12 @@ fn demo_invoke(boot_info: &BootInfo) {
     };
 
     // 2) Identify the new Frame.
-    let identified = invoke(&mut cs, CapId(5), Method::FrameIdentify, hhdm);
+    let identified = invoke::invoke(&mut cs, CapId(5), Method::FrameIdentify, hhdm);
     assert_eq!(identified, Ok(InvokeOk::Phys(frame_phys)));
 
     // 3) Rights denied: a copy of the Untyped cap without RETYPE cannot retype.
     cs.copy(ut_id, CapId(6), Rights::WRITE).unwrap();
-    let denied = invoke(
+    let denied = invoke::invoke(
         &mut cs,
         CapId(6),
         Method::UntypedRetype {
@@ -808,7 +791,7 @@ fn demo_invoke(boot_info: &BootInfo) {
     assert_eq!(denied, Err(InvokeError::InsufficientRights));
 
     // 4) Signal the Notification, then confirm the bits landed.
-    let _ = invoke(
+    let _ = invoke::invoke(
         &mut cs,
         nt_id,
         Method::NotificationSignal { bits: 0b1010 },
@@ -865,6 +848,7 @@ fn exit_current() -> ! {
             s.admit(t);
         }
         s.remove(cur);
+        thread::mark_exited(cur);
         // Removing the front makes the next thread in line current.
         s.current().expect("sched: the last runnable thread exited")
     };

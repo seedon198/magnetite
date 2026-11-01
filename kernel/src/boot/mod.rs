@@ -12,16 +12,16 @@
 //! `docs/adr/0007-unsafe-policy.md`). The `unsafe` here is limited to linker
 //! glue: the `#[unsafe(link_section = ...)]` placement of the Limine request
 //! statics (so the bootloader can find them) and the `#[unsafe(no_mangle)]`
-//! entry symbol. It is not memory-unsafe code; real hardware access still goes
-//! through `hal`.
+//! entry symbol, plus one slice over the boot modules Limine loaded
+//! ([`module_bytes`]). Real hardware access still goes through `hal`.
 #![allow(unsafe_code)]
 
-use boot_info::{BootInfo, Firmware, Framebuffer, MemoryRegion, RegionKind, ShortStr};
+use boot_info::{BootInfo, Firmware, Framebuffer, MemoryRegion, Module, RegionKind, ShortStr};
 use limine::firmware_type::FirmwareType;
 use limine::memory_map::EntryType;
 use limine::request::{
     BootloaderInfoRequest, ExecutableAddressRequest, FirmwareTypeRequest, FramebufferRequest,
-    HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
+    HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker,
 };
 use limine::BaseRevision;
 
@@ -63,6 +63,11 @@ static BOOTLOADER_INFO: BootloaderInfoRequest = BootloaderInfoRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static FIRMWARE_TYPE: FirmwareTypeRequest = FirmwareTypeRequest::new();
+
+/// The user programs loaded alongside the kernel (#82).
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULES: ModuleRequest = ModuleRequest::new();
 
 /// Markers bounding the request section so the bootloader's scan is fast.
 #[used]
@@ -130,6 +135,18 @@ pub extern "C" fn _start() -> ! {
         };
     }
 
+    if let Some(modules) = MODULES.get_response() {
+        for file in modules.modules() {
+            let path = file.path().to_str().unwrap_or("");
+            let name = path.rsplit('/').next().unwrap_or(path);
+            boot_info.push_module(Module {
+                address: file.addr() as u64,
+                size: file.size(),
+                name: ShortStr::new(name),
+            });
+        }
+    }
+
     crate::kmain(&boot_info)
 }
 
@@ -174,6 +191,16 @@ pub fn kernel_sections() -> KernelSections {
 }
 
 /// Translate a Limine memory-map entry type into our architecture-neutral kind.
+/// The bytes of boot module `m`.
+pub fn module_bytes(m: &Module) -> &'static [u8] {
+    // SAFETY: Limine loaded the module at `m.address` (an HHDM address) with
+    // `m.size` bytes and reports that memory as `KernelAndModules`, which the
+    // frame allocator never hands out (kmain checks the module lies outside
+    // every usable region), and nothing writes it: so it is valid, unaliased
+    // by any `&mut`, for the life of the kernel.
+    unsafe { core::slice::from_raw_parts(m.address as *const u8, m.size as usize) }
+}
+
 fn region_kind(entry_type: EntryType) -> RegionKind {
     match entry_type {
         EntryType::USABLE => RegionKind::Usable,

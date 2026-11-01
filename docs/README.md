@@ -12,6 +12,7 @@
 | [Boot process](architecture/boot.md) | From power-on to the root server |
 | [Interrupts & exceptions](architecture/interrupts.md) | IDT, trap frames, dispatch |
 | [Memory layout](architecture/memory-layout.md) | Address-space map and isolation |
+| [System calls](architecture/syscalls.md) | The syscall ABI, kernel methods, the root task |
 | **Decisions** | |
 | [ADR index](adr/README.md) | Architecture Decision Records |
 

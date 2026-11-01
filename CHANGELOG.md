@@ -21,6 +21,41 @@ All notable changes are documented here. The format follows
 
 ### M4: Scheduling & userspace
 
+- The first user task (#82, PR 2 of 2), per
+  [ADR 0019](docs/adr/0019-first-user-task.md). Two separately built Rust
+  programs, `user/root` and `user/fault`, are loaded from Limine boot modules
+  and run in ring 3.
+  - A new pure crate `elf` (`#![forbid(unsafe_code)]`, 22 host tests) validates
+    each image before anything is mapped: header, bounds, page congruence,
+    user range, no overlap, no `W+X`, entry in an executable segment.
+  - The syscall ABI lives in `capability::abi` (numbers, 19 error codes, method
+    labels, decoding, the null slot) and `kernel/src/syscall.rs` dispatches it:
+    IPC on endpoints, kernel object methods on anything else, and no physical
+    address ever returned to ring 3. The entry stub now carries `r12`/`r13`
+    and returns the badge and message in registers.
+  - `libs/sys` is the user side: syscall stubs, the `_start` entry and
+    `sys::entry!`, so user programs stay `#![forbid(unsafe_code)]` (ADR 0007
+    amended for it).
+  - The root task starts with four slots (null, its CNode, 64 KiB of Untyped,
+    a badged send-only console endpoint) and prints through a console server
+    over IPC. At every boot it retypes and signals a Notification, is refused
+    slots it does not hold (`InvalidCap`) and capability passing without
+    `GRANT` (`NoGrant`), and sends malformed console messages, which are
+    clamped and repaired. The fault task reads kernel memory and is ended.
+  - Every frame an exited task used is reclaimed (address space, page tables,
+    kernel stack, and the root task's bootstrap memory); the boot checks the
+    free-frame count returns to its starting value.
+  - #81 follow-ups: an `InvalidCap` IPC error, a `ReplyRecv` kernel wrapper,
+    and the HHDM offset set during init.
+  - The frame allocator gains aligned contiguous runs.
+  - CI's boot test now requires the root task's success line and `ready:`
+    (every boot-time self-check passed), matched as whole kernel log lines so
+    console output cannot fake them, and fails at once on a kernel panic;
+    before, it passed at the first log line.
+  - A missing or malformed program module is refused and the kernel boots on
+    without it; a refused retype leaves the task's Untyped untouched.
+  - New page: [System calls](docs/architecture/syscalls.md).
+
 - User-mode mechanism (#82, PR 1 of 2), per
   [ADR 0019](docs/adr/0019-first-user-task.md). Each user task gets its own
   address space (`AddressSpace::new_user`), sharing a kernel half whose
