@@ -121,7 +121,6 @@ pub fn reply_recv(
 }
 
 /// Answer the caller in this thread's reply slot.
-#[allow(dead_code)] // used by the syscall handler (#82, Task 9)
 pub fn reply(msg: Message, cap: Option<CapId>) -> Result<(), IpcError> {
     invoke(None, |ipc, caps, _, me, _, _| ipc.reply(caps, me, msg, cap)).map(|_| ())
 }

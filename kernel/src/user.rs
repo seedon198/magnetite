@@ -3,9 +3,9 @@
 //! ring 3 once and returning to the kernel only through syscalls and
 //! interrupts. A fault in ring 3 ends the thread, never the kernel.
 //!
-//! PR 1 proves the mechanism with hand-assembled stubs and two syscalls
-//! (`hello` and `exit`). The Rust root task, the ELF loader and the full
-//! syscall ABI arrive in PR 2.
+//! This module proves the mechanism with hand-assembled stubs and two debug
+//! syscalls of their own (`hello`, `report`), and keeps its regression checks
+//! running. Real programs are loaded by `task`; the ABI is `syscall`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,8 +26,6 @@ const USER_STACK_VA: u64 = 0x7fff_f000;
 /// and honoured only for the threads this demo spawns.
 const SYS_HELLO: u64 = 0x100;
 const SYS_REPORT: u64 = 0x101;
-const SYS_YIELD: u64 = 6;
-const SYS_EXIT: u64 = 7;
 
 /// Each user thread's first message register, handed to it in `rdx`.
 static MR0: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
@@ -38,9 +36,6 @@ static REPORT: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::
 
 /// The demo's threads, one bit each: only they may use the debug syscalls.
 static DEBUG_THREADS: AtomicU64 = AtomicU64::new(0);
-
-/// User demo threads that exited or were killed.
-static DONE: AtomicU64 = AtomicU64::new(0);
 
 /// Create user thread `t`: a fresh address space holding `code` (read and
 /// execute) and a one-page stack (read and write, never execute), its own
@@ -104,41 +99,33 @@ extern "C" fn user_entry() -> ! {
     hal::syscall::enter_user_once(&entry)
 }
 
-/// The system-call handler (PR 1): `hello` logs, `exit` ends the thread.
-fn syscall(args: &mut SyscallArgs) -> u64 {
-    let t = SCHED.lock().current().expect("user: a running thread");
-    let debug = DEBUG_THREADS.load(Ordering::Relaxed) & (1 << t.0) != 0;
+/// The demo's debug syscalls, for its own threads only: `hello` logs and
+/// `report` records a value. `None` for any other thread or number, which the
+/// dispatcher then treats as an ordinary syscall.
+pub fn debug_syscall(t: ThreadId, args: &SyscallArgs) -> Option<u64> {
+    if DEBUG_THREADS.load(Ordering::Relaxed) & (1 << t.0) == 0 {
+        return None;
+    }
     match args.number {
-        SYS_HELLO | SYS_REPORT if !debug => u64::MAX,
         SYS_HELLO => {
             crate::info!(
                 "user: thread {} in ring 3, own address space (mr0={:#x})",
                 t.0,
                 args.mr[0]
             );
-            0
+            Some(0)
         }
         SYS_REPORT => {
             REPORT[t.0].fetch_or(args.mr[0], Ordering::Relaxed);
-            0
+            Some(0)
         }
-        SYS_YIELD => {
-            // Block inside the kernel while other threads enter and leave
-            // their own syscalls: each must come back to its own user stack.
-            crate::yield_now();
-            0
-        }
-        SYS_EXIT => {
-            DONE.fetch_add(1, Ordering::Release);
-            crate::exit_current()
-        }
-        _ => u64::MAX,
+        _ => None,
     }
 }
 
 /// A CPU exception raised in ring 3: log it and end the thread. The kernel
-/// carries on.
-fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
+/// carries on. Registered once in `kmain`.
+pub fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
     let t = SCHED.lock().current().expect("user: a running thread");
     crate::info!(
         "user: thread {} killed: {} at {:#x}, rip={:#x}",
@@ -147,7 +134,6 @@ fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
         hal::idt::fault_address(),
         frame.rip
     );
-    DONE.fetch_add(1, Ordering::Release);
     crate::exit_current()
 }
 
@@ -164,8 +150,9 @@ fn free_frames() -> usize {
 /// - thread 9 reads kernel memory and is killed;
 /// - thread 10 reports every register at ring-3 entry and after a syscall: no
 ///   kernel value may reach ring 3, so both reports are zero;
-/// - thread 11 sets `RFLAGS.NT` and exits: the flag must not leak into the
-///   kernel, where a later `iretq` would fault in ring 0.
+/// - thread 11 sets `RFLAGS.NT`, issues an unknown syscall (it must return
+///   `InvalidSyscall`) and exits: the flag must not leak into the kernel,
+///   where a later `iretq` would fault in ring 0.
 pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     // Assembled with `llvm-mc -triple=x86_64 -filetype=obj` and
     // `llvm-objcopy -O binary --only-section=.text`, from:
@@ -195,10 +182,12 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         0x48, 0x89, 0xc2, 0xb8, 0x01, 0x01, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x07, 0x00, 0x00, 0x00,
         0x0f, 0x05, 0xeb, 0xfe,
     ];
-    // pushfq; or qword [rsp], 0x4000 (NT); popfq; exit
-    const SET_NT_EXIT: [u8; 19] = [
-        0x9c, 0x48, 0x81, 0x0c, 0x24, 0x00, 0x40, 0x00, 0x00, 0x9d, 0xb8, 0x07, 0x00, 0x00, 0x00,
-        0x0f, 0x05, 0xeb, 0xfe,
+    // pushfq; or qword [rsp], 0x4000 (NT); popfq; then syscall 99, which no
+    // ABI defines; report its rax; exit. Assembled as YIELD_REPORT.
+    const SET_NT_EXIT: [u8; 36] = [
+        0x9c, 0x48, 0x81, 0x0c, 0x24, 0x00, 0x40, 0x00, 0x00, 0x9d, 0xb8, 0x63, 0x00, 0x00, 0x00,
+        0x0f, 0x05, 0x48, 0x89, 0xc2, 0xb8, 0x01, 0x01, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x07, 0x00,
+        0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
     ];
     // movabs rax, [hhdm]; jmp $
     let mut fault = [0u8; 12];
@@ -207,9 +196,6 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     fault[10..].copy_from_slice(&[0xEB, 0xFE]);
 
     let free_before = free_frames();
-    hal::syscall::init();
-    hal::syscall::register(syscall);
-    hal::idt::register_user_fault(user_fault);
 
     let spawned = spawn_user(ThreadId(7), 1, &YIELD_REPORT, 0xA1, 0)
         && spawn_user(ThreadId(8), 2, &YIELD_REPORT, 0xA2, 64)
@@ -218,7 +204,11 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         && spawn_user(ThreadId(11), 5, &SET_NT_EXIT, 0, 0);
     assert!(spawned, "user: could not create the demo threads");
 
-    while DONE.load(Ordering::Acquire) < 5 {
+    let demo_threads = || (7..=11).map(ThreadId);
+    while hal::cpu::without_interrupts(|| {
+        let s = SCHED.lock();
+        demo_threads().any(|t| s.contains(t))
+    }) {
         crate::yield_now();
     }
 
@@ -230,6 +220,12 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     assert!(
         rsp7 == top && rsp8 == top - 64,
         "user: a thread came back from a blocking syscall on the wrong stack ({rsp7:#x}, {rsp8:#x})"
+    );
+    let unknown = REPORT[11].load(Ordering::Relaxed);
+    assert_eq!(
+        unknown,
+        capability::SysError::InvalidSyscall.code(),
+        "user: an unknown syscall did not return InvalidSyscall"
     );
     let leaked = REPORT[10].load(Ordering::Relaxed);
     assert_eq!(leaked, 0, "user: kernel register values reached ring 3");
@@ -256,7 +252,7 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
 
     // Every frame the five tasks used (code, stack, page tables, kernel stack)
     // comes back once they are reaped.
-    let reclaimed: usize = (7..=11).map(|t| thread::reap(ThreadId(t))).sum();
+    let reclaimed: usize = demo_threads().map(thread::reap).sum();
     let free_after = free_frames();
     assert_eq!(
         free_after,
