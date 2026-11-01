@@ -215,7 +215,7 @@ fn kmain(boot_info: &BootInfo) -> ! {
             "cooperative scheduling"
         }
     );
-    info!("kernel: idling (timer running; no user tasks yet)");
+    info!("kernel: idling (timer running; user demo tasks exited)");
 
     hal::cpu::halt_loop();
 }
@@ -322,9 +322,10 @@ fn init_paging(boot_info: &BootInfo) {
             && kernel.translate(VA).is_none()
             && user.translate(probe).is_some()
             && user.translate(probe) == kernel.translate(probe);
+        let supervisor_only = user.kernel_half_supervisor_only();
         user.unmap(VA);
         hal::frame::free_frame(frame);
-        ok
+        ok && supervisor_only
     });
     assert!(isolated, "paging: user space isolation self-test failed");
     // The top user page is never mappable: a `syscall` there would return to a
@@ -344,7 +345,9 @@ fn init_paging(boot_info: &BootInfo) {
         top_refused,
         "paging: the last user page must not be mappable"
     );
-    info!("paging: user space isolated (lower half private, kernel half shared)");
+    info!(
+        "paging: user space isolated (lower half private, kernel half shared and supervisor-only)"
+    );
 }
 
 /// Enforce W^X + NX: enable NX, set per-section kernel-image permissions

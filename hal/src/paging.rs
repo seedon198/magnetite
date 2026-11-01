@@ -89,7 +89,8 @@ impl AddressSpace {
 
     /// Build a user address space: a fresh PML4 whose kernel half (entries
     /// 256 to 511) is copied from `kernel`'s root, and whose user half is
-    /// empty. Returns `None` if no frame is free.
+    /// empty. The copied entries have `USER` cleared. Returns `None` if no
+    /// frame is free.
     ///
     /// The copied entries point at the kernel's own lower-level tables, so the
     /// kernel half stays shared as long as the kernel never adds a top-level
@@ -100,14 +101,30 @@ impl AddressSpace {
         let hhdm = kernel.hhdm;
         for i in HIGHER_HALF_START..ENTRY_COUNT {
             let e = kernel.entry(kernel.root.addr(), i);
-            debug_assert!(e.is_present(), "paging: kernel half not populated");
+            assert!(e.is_present(), "paging: kernel half not populated");
+            // Limine sets `USER` on some kernel-half entries; ring 3 must
+            // never reach the kernel half, so the copy is supervisor-only.
+            let bits = e.bits() & !PageTableFlags::USER.bits();
             let dst = ((hhdm + root.addr()) as *mut u64).wrapping_add(i);
             // SAFETY: `root` is a freshly allocated, zeroed 4 KiB frame we
             // exclusively own, mapped in the HHDM; `i < 512` keeps the write
             // in bounds and aligned.
-            unsafe { dst.write_volatile(e.bits()) }
+            unsafe { dst.write_volatile(bits) }
         }
         Some(Self { root, hhdm })
+    }
+
+    /// Whether every kernel-half top-level entry (256 to 511) has `USER`
+    /// clear, so nothing in the kernel half is reachable from ring 3 whatever
+    /// the lower levels say.
+    #[must_use]
+    pub fn kernel_half_supervisor_only(&self) -> bool {
+        (HIGHER_HALF_START..ENTRY_COUNT).all(|i| {
+            !self
+                .entry(self.root.addr(), i)
+                .flags()
+                .contains(PageTableFlags::USER)
+        })
     }
 
     /// Give every empty kernel-half top-level entry (256 to 511) a fresh,

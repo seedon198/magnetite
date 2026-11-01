@@ -35,7 +35,9 @@ All notable changes are documented here. The format follows
   otherwise crash the kernel through a later `iretq`), no kernel register
   value reaches ring 3 on entry or after a syscall, only exceptions user code
   can cause end a task (never NMI, `#DF` or `#MC`), and the top user page is
-  never mappable (no non-canonical `sysretq`). Each is pinned by a QEMU check.
+  never mappable (no non-canonical `sysretq`). A user address space's copy of
+  the kernel half is supervisor-only (Limine leaves `USER` set on some of its
+  top-level entries). Each is pinned by a QEMU check.
 
 - Blocking synchronous IPC over Endpoints (#81), per
   [ADR 0018](docs/adr/0018-synchronous-ipc.md). A new pure crate `ipc`
