@@ -40,7 +40,7 @@ jobs:
       - name: clippy (bare metal)
         run: >
           cargo clippy
-          -p kernel -p hal -p boot-info
+          -p kernel -p hal -p boot-info -p sys -p user-root -p user-fault
           --target x86_64-unknown-none
           -- -D warnings
 

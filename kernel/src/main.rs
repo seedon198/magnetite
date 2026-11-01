@@ -144,6 +144,7 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // the map/translate/unmap path.
     init_paging(boot_info);
     ipc::init(boot_info.hhdm_offset);
+    check_modules(boot_info);
 
     // W^X + NX hardening (M2, #40): enforce per-section kernel permissions and
     // make the direct physical map non-executable.
@@ -223,6 +224,36 @@ fn kmain(boot_info: &BootInfo) -> ! {
 
 /// Bring up the physical frame allocator from the boot memory map and exercise
 /// it with a small alloc/free smoke test.
+/// The user programs (#82) must have been loaded, and their memory must never
+/// be handed out: it lies outside every usable region (Limine reports it as
+/// `KernelAndModules`).
+fn check_modules(boot_info: &BootInfo) {
+    for name in ["root", "fault"] {
+        let m = boot_info
+            .module(name)
+            .unwrap_or_else(|| panic!("boot: module {name} missing"));
+        let phys = m.address - boot_info.hhdm_offset;
+        let end = phys + m.size;
+        let overlaps_usable = boot_info.regions().iter().any(|r| {
+            r.kind == boot_info::RegionKind::Usable && phys < r.base + r.length && r.base < end
+        });
+        assert!(
+            !overlaps_usable,
+            "boot: module {name} lies in usable memory"
+        );
+        assert!(
+            boot::module_bytes(m).starts_with(b"\x7fELF"),
+            "boot: module {name} is not an ELF file"
+        );
+    }
+    let size = |name| boot_info.module(name).map_or(0, |m| m.size);
+    info!(
+        "boot: modules root ({} bytes), fault ({} bytes)",
+        size("root"),
+        size("fault")
+    );
+}
+
 fn init_frames(boot_info: &BootInfo) {
     use boot_info::RegionKind;
     use hal::frame::Region;

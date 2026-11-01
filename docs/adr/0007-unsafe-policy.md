@@ -76,3 +76,19 @@ the same.)
 - CI must enforce it (`forbid`/`deny` are per-crate; a grep guards against a
   stray `#[allow(unsafe_code)]` outside `hal/` and `kernel/src/boot/`). The grep
   matches the *attribute*, not mentions of it in comments or docs.
+
+## Amendment (2026-11-01, #82): the user-side system-call library
+
+User programs (ADR 0019) need a few instructions no safe Rust can express: the
+`syscall` instruction itself, their `_start` entry point, and (for the
+confinement test) a read through a raw address. These live in one module,
+`libs/sys/src/arch.rs`, which carries the only `#![allow(unsafe_code)]` in
+`libs/sys`; the crate root is `#![deny(unsafe_code)]`. User programs stay
+`#![forbid(unsafe_code)]`: they name their entry through `sys::entry!`, whose
+expansion the lint does not attribute to them.
+
+`libs/sys` runs only in ring 3, so its `unsafe` cannot touch kernel memory: the
+worst it can do is fault its own task. The trusted, `unsafe`-bearing surface
+becomes three small places: the `hal` crate, the kernel `boot` module, and
+`libs/sys`'s `arch` module. `scripts/check-unsafe.sh` allows the attribute in
+`libs/sys/` and checks the crate roots under `user/` like every other.
