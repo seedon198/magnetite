@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Boot the kernel ISO headless in QEMU and assert the whole boot succeeds: the
-# serial console prints `ready:`, which `kmain` logs only after every boot-time
-# self-check has passed. Fails at once if the kernel panics. Exits 0 on success.
+# serial console shows the root task's success line and `ready:`, which `kmain`
+# logs only after every boot-time self-check has passed. Fails at once if the
+# kernel panics. Exits 0 on success.
+#
+# The markers match whole kernel log lines from their start, so text a user
+# task sends to the console (logged as `[INFO] console[N]: ...`) can never
+# satisfy them.
 #
 # We poll the serial log and stop as soon as either appears (no fixed long
 # wait). Pure serial-grep: no special kernel instrumentation is needed.
@@ -12,7 +17,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-bios}"
-MARKER="ready:"
+MARKERS=(
+    '^\[INFO\] task: root task confined'
+    '^\[INFO\] ready: '
+)
 PANIC_MARKER="KERNEL PANIC"
 ISO="build/kernel.iso"
 LOG="build/serial-${MODE}.log"
@@ -67,10 +75,7 @@ trap cleanup EXIT
 
 # Poll twice a second for the marker, or until QEMU exits or we time out.
 for ((i = 0; i < TIMEOUT_SECS * 2; i++)); do
-    if grep -qF "$MARKER" "$LOG" 2>/dev/null; then
-        echo "boot-test[$MODE]: PASS - found \"$MARKER\""
-        exit 0
-    fi
+    # Panic first: a panic and the markers can land in the same poll.
     if grep -qF "$PANIC_MARKER" "$LOG" 2>/dev/null; then
         sleep 1 # let the panic report finish
         echo "boot-test[$MODE]: FAIL - the kernel panicked. Serial log:" >&2
@@ -79,14 +84,22 @@ for ((i = 0; i < TIMEOUT_SECS * 2; i++)); do
         echo "---------------------------------------------------------------" >&2
         exit 1
     fi
+    found=1
+    for m in "${MARKERS[@]}"; do
+        grep -qE "$m" "$LOG" 2>/dev/null || found=0
+    done
+    if [[ "$found" -eq 1 ]]; then
+        echo "boot-test[$MODE]: PASS - the root task passed and the kernel is ready"
+        exit 0
+    fi
     if ! kill -0 "$qpid" 2>/dev/null; then
-        echo "boot-test[$MODE]: QEMU exited before the marker appeared" >&2
+        echo "boot-test[$MODE]: QEMU exited before the markers appeared" >&2
         break
     fi
     sleep 0.5
 done
 
-echo "boot-test[$MODE]: FAIL - marker not seen within ${TIMEOUT_SECS}s. Serial log:" >&2
+echo "boot-test[$MODE]: FAIL - success markers not seen within ${TIMEOUT_SECS}s. Serial log:" >&2
 echo "---------------------------------------------------------------" >&2
 cat "$LOG" >&2 || true
 echo "---------------------------------------------------------------" >&2
