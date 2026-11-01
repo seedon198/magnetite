@@ -31,6 +31,11 @@ All notable changes are documented here. The format follows
   for a reply is woken with `PeerExited` (`Ipc::exit`). Verified in QEMU: two
   hand-assembled tasks say hello from ring 3, are preempted there and exit,
   and a third that reads kernel memory is killed while the kernel boots on.
+  Hardened after review: `syscall` entry masks `RFLAGS.NT` (user code could
+  otherwise crash the kernel through a later `iretq`), no kernel register
+  value reaches ring 3 on entry or after a syscall, only exceptions user code
+  can cause end a task (never NMI, `#DF` or `#MC`), and the top user page is
+  never mappable (no non-canonical `sysretq`). Each is pinned by a QEMU check.
 
 - Blocking synchronous IPC over Endpoints (#81), per
   [ADR 0018](docs/adr/0018-synchronous-ipc.md). A new pure crate `ipc`
