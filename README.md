@@ -34,7 +34,7 @@
 > ahead. For authorized security research and testing only.
 
 <p align="center">
-  <img src="docs/assets/boot-qemu.svg" alt="Magnetite booting in QEMU: serial console output" width="820">
+  <img src="docs/assets/boot.gif" alt="Magnetite booting in QEMU: the boot banner, system summary and serial log, recorded from a real UEFI boot" width="820">
 </p>
 
 ## What it is

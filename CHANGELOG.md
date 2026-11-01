@@ -12,9 +12,11 @@ All notable changes are documented here. The format follows
   <https://github.com/seedon198/magnetite>. GitHub redirects the old
   `seedon198/kernel` URLs. New brand assets in `docs/assets/`, all with text
   converted to outlines: an element-tile logo and README banner in light and
-  dark, a small icon, and a social preview. Alongside them, an SVG capture of a
-  real UEFI boot and an architecture diagram, plus the scripts that generate
-  them (`scripts/brand/`). The README is rewritten around them, with current
+  dark, a small icon, and a social preview. Alongside them, an animated
+  recording of a real UEFI boot (`boot.gif`: the serial console with real,
+  lightly compressed timing, in the brand palette and window frame) and an
+  architecture diagram, plus the scripts that generate them
+  (`scripts/brand/`). The README is rewritten around them, with current
   status (v0.3.0, M4 under way) and a milestone table.
 
 ### M4: Scheduling & userspace
