@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Boot the kernel ISO headless in QEMU and assert it reaches userland-visible
-# life: the serial console prints the expected marker. Exits 0 on success.
+# Boot the kernel ISO headless in QEMU and assert the whole boot succeeds: the
+# serial console prints `ready:`, which `kmain` logs only after every boot-time
+# self-check has passed. Fails at once if the kernel panics. Exits 0 on success.
 #
-# The kernel prints the marker and halts, so we poll the serial log and stop as
-# soon as it appears (no fixed long wait). Pure serial-grep: no special kernel
-# instrumentation is needed.
+# We poll the serial log and stop as soon as either appears (no fixed long
+# wait). Pure serial-grep: no special kernel instrumentation is needed.
 #
 # Usage: scripts/boot-test.sh <bios|uefi>
 set -euo pipefail
@@ -12,7 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-bios}"
-MARKER="hello from the kernel"
+MARKER="ready:"
+PANIC_MARKER="KERNEL PANIC"
 ISO="build/kernel.iso"
 LOG="build/serial-${MODE}.log"
 TIMEOUT_SECS="${BOOT_TEST_TIMEOUT:-60}"
@@ -69,6 +70,14 @@ for ((i = 0; i < TIMEOUT_SECS * 2; i++)); do
     if grep -qF "$MARKER" "$LOG" 2>/dev/null; then
         echo "boot-test[$MODE]: PASS - found \"$MARKER\""
         exit 0
+    fi
+    if grep -qF "$PANIC_MARKER" "$LOG" 2>/dev/null; then
+        sleep 1 # let the panic report finish
+        echo "boot-test[$MODE]: FAIL - the kernel panicked. Serial log:" >&2
+        echo "---------------------------------------------------------------" >&2
+        cat "$LOG" >&2 || true
+        echo "---------------------------------------------------------------" >&2
+        exit 1
     fi
     if ! kill -0 "$qpid" 2>/dev/null; then
         echo "boot-test[$MODE]: QEMU exited before the marker appeared" >&2
