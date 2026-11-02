@@ -193,12 +193,56 @@ fn kmain(boot_info: &BootInfo) -> ! {
     hal::context::run_on_stack(top, kmain_guarded, 0)
 }
 
+/// Fold the bootloader's reclaimable memory into the frame pool (#65). Safe
+/// only from here: the kernel's page tables are its own copies
+/// (`AddressSpace::new_kernel`), the handoff lives in a static
+/// (`boot::info`), and the boot thread has left the bootloader's stack; the
+/// boot modules are `KernelAndModules` memory, not reclaimable. ACPI-
+/// reclaimable memory stays reserved until something parses ACPI.
+fn reclaim_bootloader_memory(boot_info: &BootInfo) {
+    use boot_info::RegionKind;
+
+    let reclaimable = |addr: u64| {
+        boot_info.regions().iter().any(|r| {
+            r.kind == RegionKind::BootloaderReclaimable
+                && (r.base..r.base + r.length).contains(&addr)
+        })
+    };
+    // Nothing the kernel runs on may be in that memory: not the page tables
+    // in CR3, and not this stack.
+    let root = KERNEL_SPACE
+        .lock()
+        .as_ref()
+        .map_or(0, AddressSpace::root_phys);
+    let stack = KERNEL_SPACE
+        .lock()
+        .as_ref()
+        .and_then(|k| k.translate(hal::cpu::stack_pointer()))
+        .unwrap_or(0);
+    assert!(
+        !reclaimable(root) && !reclaimable(stack),
+        "boot: the kernel still runs on bootloader memory"
+    );
+
+    let mut frames = 0;
+    for r in boot_info.regions() {
+        if r.kind == RegionKind::BootloaderReclaimable {
+            frames += hal::frame::reclaim(r.base, r.length);
+        }
+    }
+    info!(
+        "boot: reclaimed {} KiB of bootloader memory into the frame pool",
+        frames * hal::frame::FRAME_SIZE as usize / 1024
+    );
+}
+
 /// Whether SMEP and SMAP were enabled (bits 0 and 1), for the `ready:` line.
 static SMEP_SMAP: AtomicU8 = AtomicU8::new(0);
 
 /// The rest of boot, on the boot thread's guarded kernel stack.
 extern "C" fn kmain_guarded(_: u64) -> ! {
     let boot_info = boot::info();
+    reclaim_bootloader_memory(boot_info);
     let flags = SMEP_SMAP.load(Ordering::Relaxed);
     let (smep, smap) = (flags & 1 != 0, flags & 2 != 0);
 

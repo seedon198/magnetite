@@ -353,6 +353,14 @@ All notable changes are documented here. The format follows
   boot that logs any `[WARN]` or `[ERROR]` line its mode does not expect, so
   the remaining fallbacks (a missing boot module, an uncalibrated timer) are
   caught too.
+- Bootloader-reclaimable memory now joins the frame pool (#65): 19 MiB under
+  UEFI and 4 MiB under BIOS on the QEMU test machine. Three prerequisites
+  first: `AddressSpace::new_kernel` deep-copies the higher half's page tables
+  into kernel-owned frames (the kernel had been running on Limine's), `_start`
+  assembles the handoff in a static instead of on the Limine stack, and boot
+  already runs on a guarded kernel stack (#66). Reclaimed frames are zeroed as
+  they are added, and the boot asserts that neither the active page tables nor
+  the stack lie in that memory. ACPI-reclaimable memory stays reserved.
 
 ## [0.3.0] - 2026-10-28
 

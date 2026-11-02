@@ -92,6 +92,29 @@ pub fn owns(phys: u64, len: u64) -> bool {
         .all(|i| alloc.is_allocated(PhysFrame::containing(i * FRAME_SIZE)))
 }
 
+/// Add the frames in `[base, base + len)` that are not in the pool yet, such
+/// as memory the bootloader no longer needs (#65), to the pool. Each is
+/// **zeroed first**: the bootloader's data never reaches a new owner, and a
+/// structure still in use there breaks at once, at boot, rather than when the
+/// frame is next handed out. Returns how many frames were added (0 before
+/// init).
+///
+/// The caller guarantees nothing uses that memory any more.
+pub fn reclaim(base: u64, len: u64) -> usize {
+    let mut guard = ALLOCATOR.lock();
+    let Some(alloc) = guard.as_mut() else {
+        return 0;
+    };
+    let end = base.saturating_add(len) / FRAME_SIZE;
+    for i in base.div_ceil(FRAME_SIZE)..end.min(alloc.total_frames() as u64) {
+        let frame = PhysFrame::containing(i * FRAME_SIZE);
+        if !alloc.in_pool(frame) {
+            zero_frame(frame);
+        }
+    }
+    alloc.reclaim(base, len)
+}
+
 /// Allocate one zeroed physical frame, or `None` if none are free or the
 /// allocator is not initialized.
 pub fn alloc_frame() -> Option<PhysFrame> {
@@ -149,8 +172,9 @@ pub fn stats() -> Option<Stats> {
 fn zero_frame(frame: PhysFrame) {
     let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
     let ptr = (hhdm + frame.addr()) as *mut u8;
-    // SAFETY: `frame` was just returned by the allocator, so it is a 4 KiB
-    // usable RAM frame now exclusively ours. It is mapped in the HHDM at
+    // SAFETY: `frame` was just returned by the allocator, or is about to join
+    // the pool from memory the caller of `reclaim` guarantees unused, so it
+    // is a 4 KiB RAM frame now exclusively ours. It is mapped in the HHDM at
     // `hhdm`, so `ptr .. ptr + FRAME_SIZE` is valid, writable, and contained in
     // that frame.
     unsafe {

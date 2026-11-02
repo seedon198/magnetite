@@ -80,25 +80,57 @@ pub struct AddressSpace {
 
 impl AddressSpace {
     /// Build the kernel address space: allocate a fresh PML4 and copy the
-    /// bootloader's higher-half top-level entries (kernel image + HHDM) into
-    /// it, leaving the lower half empty. Returns `None` if no frame is free.
+    /// bootloader's whole higher half (kernel image + HHDM), tables included,
+    /// into frames of our own, leaving the lower half empty. Returns `None` if
+    /// frames ran out.
     ///
     /// Call [`switch`](Self::switch) to install it in `CR3`.
     pub fn new_kernel(hhdm: u64) -> Option<Self> {
         let root = frame::alloc_frame()?; // zeroed by the allocator
         let current = read_cr3() & page_table::ADDR_MASK;
-        // SAFETY: `current` is the physical base of the active PML4 (from CR3);
-        // `root` is a freshly allocated, zeroed 4 KiB frame we exclusively own.
-        // Both are mapped in the HHDM at `hhdm`, so these are valid, aligned
-        // pointers to 512-entry tables. We copy only the higher-half entries.
-        unsafe {
-            let src = (hhdm + current) as *const u64;
-            let dst = (hhdm + root.addr()) as *mut u64;
-            for i in HIGHER_HALF_START..ENTRY_COUNT {
-                dst.add(i).write_volatile(src.add(i).read_volatile());
+        let space = Self { root, hhdm };
+        // Copy the higher half **deeply**: every table below the PML4 is
+        // cloned into a frame of our own, so nothing the kernel runs on stays
+        // in the bootloader's page tables, which live in memory the kernel
+        // later reclaims (#65). Leaf and large-page entries are copied as
+        // they are, so the mappings are identical.
+        for i in HIGHER_HALF_START..ENTRY_COUNT {
+            let e = space.entry(current, i);
+            let copied = if e.is_present() {
+                let table = space.clone_table(e.addr(), 3)?;
+                PageTableEntry::new(table, e.flags())
+            } else {
+                e
+            };
+            // SAFETY: in-bounds entry of our own fresh PML4, reached via the
+            // HHDM; nothing uses this space yet.
+            unsafe {
+                space
+                    .entry_ptr(root.addr(), i)
+                    .write_volatile(copied.bits())
             }
         }
-        Some(Self { root, hhdm })
+        Some(space)
+    }
+
+    /// Copy the table at `table_phys`, a level-`level` table (3 PDPT, 2 PD,
+    /// 1 PT), and every table below it, into fresh frames; return the copy's
+    /// physical address. Entries that map memory (4 KiB leaves and large
+    /// pages) are copied unchanged. `None` if frames ran out.
+    fn clone_table(&self, table_phys: u64, level: u8) -> Option<u64> {
+        let copy = frame::alloc_frame()?; // zeroed
+        for i in 0..ENTRY_COUNT {
+            let e = self.entry(table_phys, i);
+            let out = if level > 1 && e.is_present() && !e.is_huge() {
+                PageTableEntry::new(self.clone_table(e.addr(), level - 1)?, e.flags())
+            } else {
+                e
+            };
+            // SAFETY: `copy` is a fresh zeroed frame we own, reached via the
+            // HHDM, and `i < 512`.
+            unsafe { self.entry_ptr(copy.addr(), i).write_volatile(out.bits()) }
+        }
+        Some(copy.addr())
     }
 
     /// Build a user address space: a fresh PML4 whose kernel half (entries

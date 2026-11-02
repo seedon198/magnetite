@@ -264,6 +264,34 @@ impl<'a> FrameAllocator<'a> {
         Ok(())
     }
 
+    /// Add the frames fully inside `[base, base + len)` that are not in the
+    /// pool yet to it, free: memory the bootloader is done with (#65). Frames
+    /// already in the pool, and frames past the tracked range, are left alone.
+    /// Returns how many frames were added.
+    pub fn reclaim(&mut self, base: u64, len: u64) -> usize {
+        let start = base.div_ceil(FRAME_SIZE) as usize;
+        let end = ((base.saturating_add(len)) / FRAME_SIZE) as usize;
+        let mut added = 0;
+        for i in start..end.min(self.frames) {
+            let bit = 1u64 << (i % 64);
+            if self.pool[i / 64] & bit != 0 {
+                continue;
+            }
+            self.pool[i / 64] |= bit;
+            self.mark_free(i);
+            self.usable += 1;
+            added += 1;
+        }
+        added
+    }
+
+    /// Whether `frame` is in the pool, free or allocated.
+    #[must_use]
+    pub fn in_pool(&self, frame: PhysFrame) -> bool {
+        let i = frame.index();
+        i < self.frames && self.pool[i / 64] & (1 << (i % 64)) != 0
+    }
+
     /// Whether `frame` is a pool frame that is allocated now: what memory the
     /// kernel may treat as its own object storage (#106).
     #[must_use]
@@ -448,6 +476,38 @@ mod tests {
             !a.is_allocated(PhysFrame::from_index(40)),
             "an untracked frame"
         );
+    }
+
+    #[test]
+    fn reclaim_adds_new_frames_to_the_pool_once() {
+        // Frames 0..8 usable; 8..16 bootloader memory, reserved at first.
+        let mut bitmap = [0u64; 2];
+        let regions = [
+            usable(0, 8 * FRAME_SIZE),
+            Region {
+                base: 8 * FRAME_SIZE,
+                length: 8 * FRAME_SIZE,
+                usable: false,
+            },
+        ];
+        let mut a = FrameAllocator::new(&mut bitmap, 16, &regions, &[]);
+        let (free, usable_frames) = (a.free_frames(), a.usable_frames());
+        assert_eq!(
+            a.free(PhysFrame::from_index(9)),
+            Err(FreeError::NotPoolFrame)
+        );
+        // Partial frames at the edges are not taken; whole ones are.
+        assert_eq!(a.reclaim(8 * FRAME_SIZE + 1, 8 * FRAME_SIZE - 1), 7);
+        assert_eq!(a.free_frames(), free + 7);
+        assert_eq!(a.usable_frames(), usable_frames + 7);
+        // A reclaimed frame allocates and frees like any pool frame.
+        while a.alloc().is_some() {}
+        assert_eq!(a.free(PhysFrame::from_index(9)), Ok(()));
+        // Reclaiming again, or reclaiming pool frames, adds nothing.
+        assert_eq!(a.reclaim(0, 16 * FRAME_SIZE), 1);
+        assert_eq!(a.reclaim(0, 16 * FRAME_SIZE), 0);
+        // Past the tracked range: ignored.
+        assert_eq!(a.reclaim(64 * FRAME_SIZE, FRAME_SIZE), 0);
     }
 
     #[test]

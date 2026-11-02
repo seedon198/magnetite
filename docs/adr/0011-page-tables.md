@@ -27,7 +27,14 @@ allocates its own PML4 from the frame allocator (#38). The kernel address space
 is built by copying Limine's **higher-half** top-level entries (PML4 indices
 256..512 - the kernel image and the HHDM) into our PML4, then switching `CR3`
 to it. The lower half (indices 0..256) starts empty and is ours to manage at
-4 KiB granularity via `map`/`unmap`. Everything the running kernel touches -
+4 KiB granularity via `map`/`unmap`.
+
+*Amended for #65:* the copy is **deep**. Limine's lower-level tables live in
+bootloader-reclaimable memory, which the kernel now folds into the frame pool,
+so `new_kernel` clones every higher-half table below the PML4 into frames of
+its own; leaf and large-page entries are copied unchanged, so the mappings
+are identical. With the shallow copy, reclaiming that memory zeroed tables the
+kernel was running on. Everything the running kernel touches -
 its image, stacks, the framebuffer, and all physical access - is in the higher
 half, so the `CR3` switch is seamless.
 

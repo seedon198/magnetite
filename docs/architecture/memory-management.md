@@ -22,6 +22,10 @@ map ([ADR 0010](../adr/0010-bitmap-frame-allocator.md)).
   lives in the pure, `forbid(unsafe)`, host-tested `frame-alloc` crate.
 - `hal::frame` backs the bitmap with real RAM through the HHDM and **zeroes every
   frame on allocation**, so a new owner never reads a previous owner's data.
+- **Bootloader-reclaimable memory joins the pool** once the kernel no longer
+  needs it (#65): after the page tables are its own, the handoff is copied
+  into a static and boot has left the bootloader's stack. Each frame is zeroed
+  as it is added. ACPI-reclaimable memory stays reserved until ACPI is parsed.
 - Frame 0 and the bitmap's own storage are reserved. A second bitmap records
   the **pool** (usable RAM minus reserved ranges), and `free` accepts only pool
   frames: a double free, or a free of frame 0, the bitmap, a reserved range or
@@ -43,8 +47,8 @@ The kernel runs on 4-level page tables it owns
   `protect`, walking tables **through the HHDM** and allocating intermediate
   tables from the frame allocator.
 - The kernel address space is built by `new_kernel`, which allocates a fresh
-  PML4, **inherits the bootloader's higher-half entries** (kernel image + HHDM),
-  and switches `CR3` to it. The lower half is managed at 4 KiB granularity;
+  PML4, **copies the bootloader's whole higher half** (kernel image + HHDM,
+  every table cloned into frames of its own, #65), and switches `CR3` to it. The lower half is managed at 4 KiB granularity;
   `translate` also resolves inherited 2 MiB / 1 GiB huge pages.
 - Each user task has its own PML4 (`AddressSpace::new_user`, #82): a private
   lower half and the kernel half's top-level entries copied in, supervisor-only.
