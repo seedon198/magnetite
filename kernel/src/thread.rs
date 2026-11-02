@@ -27,6 +27,10 @@ pub const MAX: usize = 18;
 /// Saved contexts, indexed by [`ThreadId`].
 pub static CONTEXTS: [Context; MAX] = [const { Context::new() }; MAX];
 
+/// The kernel-stack window slot the boot thread moves onto (#66). Slot 0 is
+/// the guard self-test's; tasks and demos use slots 1 to 10.
+pub const BOOT_STACK_SLOT: usize = 11;
+
 /// Each thread's kernel stack top (0 = runs on the stack it was started on).
 static KSTACK_TOP: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 

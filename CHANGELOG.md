@@ -295,6 +295,19 @@ All notable changes are documented here. The format follows
   - The page-fault classifier names the whole heap window, so later growth is
     named too, and a new classifier hook names each thread's kernel-stack
     guard and stack.
+- HAL safety (#66, #67, #68, #106):
+  - `kmain` leaves the bootloader's unguarded stack early for a kernel stack
+    with a guard page below it (`hal::context::run_on_stack`); the boot
+    asserts it then runs on a "kernel stack".
+  - `AddressSpace::switch` checks that the new space maps the running code,
+    the current stack and its own tables before loading `CR3`, and panics
+    instead of triple-faulting.
+  - Every `hal::object` access checks that its physical range lies in
+    allocated pool frames (`hal::frame::owns`), so safe kernel code cannot aim
+    it at the kernel image, the bitmap or MMIO. Typed object references are
+    part of ADR 0020 (#156).
+  - Kernel OOM is already reported: the default `no_std` allocation-error
+    handler panics with the size into our panic handler; now documented.
 
 ## [0.3.0] - 2026-10-28
 

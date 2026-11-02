@@ -124,6 +124,8 @@ to `GlobalAlloc`, so `Box` / `Vec` / `String` work in the kernel
   cleared, so no allocation sees an earlier one's data (#69).
 - Every size sum is checked: a `Layout` too large to meet gets null, never an
   overflow panic or a wrapped, too-small block (#121).
+- An infallible allocation that fails panics with the failed size, through the
+  panic handler and its backtrace (stable `no_std` behaviour, #68).
 - The heap lives in a dedicated higher-half window
   (`0xffffffff90000000`). *Known limitation:* this window is a fixed base and is
   not yet coordinated with the KASLR slide; making it collision-checked /
