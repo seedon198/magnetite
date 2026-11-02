@@ -155,7 +155,26 @@ pub fn enable_smep_smap(smep: bool, smap: bool) -> (bool, bool) {
 }
 
 /// Read `CR4`.
-fn read_cr4() -> u64 {
+/// Read `CR0`.
+pub(crate) fn read_cr0() -> u64 {
+    let value: u64;
+    // SAFETY: reading CR0 is a side-effect-free privileged register read.
+    unsafe { asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) }
+    value
+}
+
+/// Write `CR0`.
+///
+/// # Safety
+/// `value` must keep paging and protection enabled (PG, PE, WP); only the
+/// FPU-control bits may differ from the current value.
+pub(crate) unsafe fn write_cr0(value: u64) {
+    // SAFETY: guaranteed by the caller's contract above. Not `nomem`: like a
+    // CR4 write, it changes how later instructions behave.
+    unsafe { asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags)) }
+}
+
+pub(crate) fn read_cr4() -> u64 {
     let value: u64;
     // SAFETY: reading CR4 is a side-effect-free privileged register read.
     unsafe { asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags)) }
@@ -167,7 +186,7 @@ fn read_cr4() -> u64 {
 /// # Safety
 /// `value` must be a valid `CR4` configuration for the current mode (e.g. it
 /// must not clear bits required to stay in long mode).
-unsafe fn write_cr4(value: u64) {
+pub(crate) unsafe fn write_cr4(value: u64) {
     // SAFETY: guaranteed by the caller's contract above. Not `nomem`: SMEP,
     // SMAP and PGE change how the accesses around it behave.
     unsafe { asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) }

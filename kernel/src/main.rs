@@ -156,6 +156,11 @@ fn kmain(boot_info: &BootInfo) -> ! {
     let (smep, smap) = hal::cpu::enable_smep_smap(f.smep, f.smap);
     info!("cpu protections: smep={smep} smap={smap}");
 
+    // FPU and SSE (#83): on for every thread, with per-thread state saved and
+    // restored at each context switch.
+    hal::fpu::init();
+    info!("fpu: x87 and SSE enabled; state saved per thread (fxsave)");
+
     // Memory, layout and the KASLR slide (#47) are reported in the banner.
 
     // Physical frame allocator (M2, #38). Translate the memory map into the
