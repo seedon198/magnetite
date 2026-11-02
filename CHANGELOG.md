@@ -182,6 +182,12 @@ All notable changes are documented here. The format follows
   kernel backtrace for a ring-3 frame. Two boot checks cover it: a walk from
   an unmapped link returns no frames, and a ring-3 task with a marker `rbp`
   checks that the kernel chain ends at 0 and its `rbp` comes back.
+- Limine was cloned from the moving `v11.x-binary` branch head with no
+  verification, and its Makefile runs on the host (#112): a force-push or
+  compromise upstream reached every CI job and contributor build, and two
+  builds of one commit could boot different bootloaders. `xtask` now pins the
+  v11.4.1 commit, fetches exactly that commit, and on every build checks
+  that `limine/` is still at it with no tracked file modified.
 
 ### Fixed
 
@@ -199,6 +205,10 @@ All notable changes are documented here. The format follows
   scheduled after its `sti`, letting the timer interrupt spin forever on a
   lock still marked held. They are now compiler barriers. Current codegen was
   already correct, so no boot behaviour changes.
+- The Rust toolchain was not pinned (#114): `rust-toolchain.toml` said
+  `channel = "stable"`, so each new release could change lints under
+  `-D warnings` and the binaries contributors built. It is now pinned to
+  `1.99.1`, to be bumped deliberately in its own PR.
 
 ## [0.3.0] - 2026-10-28
 
