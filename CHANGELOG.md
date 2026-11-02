@@ -267,6 +267,10 @@ All notable changes are documented here. The format follows
   data. `heap_grow` undoes a partial growth when frames run out, instead of
   orphaning the pages and wedging later growth. The heap self-test checks
   the first two.
+- The frame allocator accepted frees of frames it never owned (#122): frame
+  0, the bitmap's own storage, reserved ranges and MMIO holes all went into
+  the pool. A second bitmap now records the pool, and `free` returns a new
+  `FreeError::NotPoolFrame` for anything outside it (host-tested).
 
 ## [0.3.0] - 2026-10-28
 
