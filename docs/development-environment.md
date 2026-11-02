@@ -51,8 +51,9 @@ brew install qemu xorriso x86_64-elf-gdb
 | `xorriso` | builds the bootable ISO |
 | `x86_64-elf-gdb` | source-level kernel debugging (`lldb` also works) |
 
-The exact toolchain (stable vs. a pinned nightly) is set by `rust-toolchain.toml`
-in the repo, so `cargo` selects it automatically.
+The exact toolchain (a specific stable release today, or a pinned nightly if
+ever needed) is set by `rust-toolchain.toml` in the repo, so `cargo` and
+`rustup` select and install it automatically.
 
 ## Linux
 

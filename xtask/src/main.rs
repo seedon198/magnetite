@@ -19,9 +19,6 @@ use std::process::{exit, Command};
 /// Bare-metal target the kernel is compiled for (ADR 0002).
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 
-/// Pinned Limine release. The binary distribution is published on per-major
-/// branches; `v11.x-binary` is the latest prebuilt branch (v12 is source-only).
-/// See docs/adr/0003-bootloader.md.
 /// User programs loaded as Limine boot modules (#82, ADR 0019): (package,
 /// binary). Each lands at `/boot/<binary>` on the ISO.
 const USER_PROGRAMS: &[(&str, &str)] = &[("user-root", "root"), ("user-fault", "fault")];
@@ -36,8 +33,15 @@ const USER_RUSTFLAGS: &[&str] = &[
     "-Clink-arg=--no-pie",
 ];
 
+/// Pinned Limine release. The binary distribution is published on per-major
+/// branches (`v11.x-binary` is the latest prebuilt one; v12 is source-only), so
+/// we pin the commit of one binary release on that branch, never its moving
+/// head (#112). The commit hash covers every file in the tree, including the
+/// bootloader binaries copied into the ISO. Bump both constants together, in
+/// their own PR. See docs/adr/0003-bootloader.md.
 const LIMINE_REPO: &str = "https://github.com/limine-bootloader/limine.git";
-const LIMINE_BRANCH: &str = "v11.x-binary";
+const LIMINE_RELEASE: &str = "v11.4.1";
+const LIMINE_COMMIT: &str = "5be26a73d7b7b4d4477d18be94e1d16e615adf56";
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -152,25 +156,69 @@ fn build() -> PathBuf {
 
 /// Clone the pinned Limine binary branch and build its host `limine` tool.
 /// Idempotent: skips the clone if `limine/` already exists.
+/// Fetch Limine at [`LIMINE_COMMIT`] into `limine/` (or move an existing
+/// checkout there), verify it, and build its host utility. Verified on every
+/// build, so a stale or edited checkout never reaches an ISO.
 fn fetch_limine() -> PathBuf {
     let dir = PathBuf::from("limine");
+    let d = dir.to_str().unwrap();
     if !dir.exists() {
+        run("git", &["init", "--quiet", d]);
+    }
+    if git_output(d, &["rev-parse", "HEAD"]).as_deref() != Some(LIMINE_COMMIT) {
+        println!("limine: fetching {LIMINE_RELEASE} ({LIMINE_COMMIT})");
         run(
             "git",
             &[
-                "clone",
-                LIMINE_REPO,
-                "--branch",
-                LIMINE_BRANCH,
+                "-C",
+                d,
+                "fetch",
+                "--quiet",
                 "--depth",
                 "1",
-                dir.to_str().unwrap(),
+                LIMINE_REPO,
+                LIMINE_COMMIT,
             ],
         );
+        run(
+            "git",
+            &["-C", d, "checkout", "--quiet", "--detach", LIMINE_COMMIT],
+        );
     }
+    verify_limine(d);
     // Build the `limine` host utility used to install the BIOS stage.
-    run("make", &["-C", dir.to_str().unwrap()]);
+    run("make", &["-C", d]);
     dir
+}
+
+/// Fail unless the checkout in `dir` is exactly [`LIMINE_COMMIT`] with no
+/// tracked file modified (the files we copy into the ISO are all tracked).
+fn verify_limine(dir: &str) {
+    let head = git_output(dir, &["rev-parse", "HEAD"]);
+    if head.as_deref() != Some(LIMINE_COMMIT) {
+        fail(&format!(
+            "limine/ is at {}, not the pinned {LIMINE_COMMIT}; delete limine/ to refetch",
+            head.as_deref().unwrap_or("no commit")
+        ));
+    }
+    let changed = git_output(dir, &["status", "--porcelain", "--untracked-files=no"]);
+    if changed.as_deref() != Some("") {
+        fail("limine/ has modified tracked files; delete limine/ to refetch");
+    }
+    println!("limine: {LIMINE_RELEASE} verified at {LIMINE_COMMIT}");
+}
+
+/// Run `git -C dir args` and return its trimmed stdout, or `None` if it failed.
+fn git_output(dir: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) {

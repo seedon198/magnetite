@@ -29,7 +29,10 @@ large sub-project and the least reusable part of an OS. We need to boot from
 
 Use **Limine** with the Limine boot protocol. Pin a specific Limine release;
 fetch its binary branch at build time (via `xtask`) rather than vendoring
-binaries in git. Keep the protocol bindings behind our own `BootInfo` so the
+binaries in git. The pin is a commit on that branch, never its moving head:
+`xtask` fetches exactly that commit and, on every build, checks that
+`limine/` is still at it with no tracked file modified (#112). Keep the
+protocol bindings behind our own `BootInfo` so the
 kernel never touches Limine types directly.
 
 ## Consequences
