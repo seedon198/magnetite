@@ -267,8 +267,9 @@ fn default_exception(frame: &mut TrapFrame) {
 /// Trigger a breakpoint exception (`int3`). Used to exercise the trap path.
 pub fn breakpoint() {
     // SAFETY: `int3` raises a #BP trap, which our IDT handles and resumes from.
+    // Not `nomem`: the handler it runs reads and writes memory.
     unsafe {
-        asm!("int3", options(nomem, nostack));
+        asm!("int3", options(nostack));
     }
 }
 

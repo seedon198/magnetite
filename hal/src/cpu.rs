@@ -1,4 +1,11 @@
 //! Core CPU control primitives.
+//!
+//! The asm here that changes how memory behaves, or lets an interrupt handler
+//! run (`cli`, `sti`, `hlt`, CR4 writes), is deliberately **not** `nomem`:
+//! `nomem` lets the compiler move loads and stores across the instruction, and
+//! atomic orderings do not order such a block. Without it the block is a
+//! compiler barrier, so a `SpinLock`'s acquire stays after its `cli` and its
+//! release store before its `sti` (#110). Pure register reads stay `nomem`.
 
 use core::arch::asm;
 
@@ -10,9 +17,10 @@ pub fn halt_loop() -> ! {
     loop {
         // SAFETY: `hlt` halts the logical CPU until the next interrupt. It has
         // no memory operands and no effect on program state besides stopping
-        // until an interrupt, so it is always sound to execute in ring 0.
+        // until an interrupt, so it is always sound to execute in ring 0. Not
+        // `nomem`: interrupt handlers that run while it waits write memory.
         unsafe {
-            asm!("hlt", options(nomem, nostack, preserves_flags));
+            asm!("hlt", options(nostack, preserves_flags));
         }
     }
 }
@@ -25,23 +33,25 @@ pub fn halt_loop() -> ! {
 pub fn halt() {
     // SAFETY: as in `halt_loop` - `hlt` only pauses until the next interrupt.
     unsafe {
-        asm!("hlt", options(nomem, nostack, preserves_flags));
+        asm!("hlt", options(nostack, preserves_flags));
     }
 }
 
 /// Disable maskable interrupts on the current CPU.
 pub fn disable_interrupts() {
-    // SAFETY: `cli` only clears the interrupt flag; it has no memory effects.
+    // SAFETY: `cli` only clears the interrupt flag. Not `nomem`, so it is a
+    // compiler barrier: the critical section's accesses stay after it.
     unsafe {
-        asm!("cli", options(nomem, nostack));
+        asm!("cli", options(nostack));
     }
 }
 
 /// Enable maskable interrupts on the current CPU.
 pub fn enable_interrupts() {
-    // SAFETY: `sti` only sets the interrupt flag; it has no memory effects.
+    // SAFETY: `sti` only sets the interrupt flag. Not `nomem`, so it is a
+    // compiler barrier: the critical section's accesses stay before it.
     unsafe {
-        asm!("sti", options(nomem, nostack));
+        asm!("sti", options(nostack));
     }
 }
 
@@ -149,6 +159,7 @@ fn read_cr4() -> u64 {
 /// `value` must be a valid `CR4` configuration for the current mode (e.g. it
 /// must not clear bits required to stay in long mode).
 unsafe fn write_cr4(value: u64) {
-    // SAFETY: guaranteed by the caller's contract above.
-    unsafe { asm!("mov cr4, {}", in(reg) value, options(nomem, nostack, preserves_flags)) }
+    // SAFETY: guaranteed by the caller's contract above. Not `nomem`: SMEP,
+    // SMAP and PGE change how the accesses around it behave.
+    unsafe { asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) }
 }

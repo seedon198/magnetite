@@ -49,6 +49,8 @@ impl<T> SpinLock<T> {
     pub fn lock(&self) -> SpinGuard<'_, T> {
         // Save-and-disable interrupts *before* acquiring, so that once we hold
         // the lock no interrupt on this core can run and try to take it.
+        // `cli` is a compiler barrier (not `nomem`, see `hal::cpu`), so the
+        // acquire cannot be scheduled ahead of it (#110).
         let saved_if = crate::cpu::interrupts_enabled();
         crate::cpu::disable_interrupts();
         while self
@@ -99,6 +101,8 @@ impl<T> Drop for SpinGuard<'_, T> {
         self.lock.locked.store(false, Ordering::Release);
         // Restore the interrupt state we found on acquisition. We only ever
         // re-enable; we never enable interrupts that were disabled before.
+        // `sti` is a compiler barrier too, so the release store above stays
+        // ahead of it.
         if self.saved_if {
             crate::cpu::enable_interrupts();
         }
