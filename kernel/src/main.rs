@@ -124,6 +124,20 @@ fn kmain(boot_info: &BootInfo) -> ! {
     banner::print(boot_info, &cpu);
 
     info!("hello from the kernel");
+    // A bootloader map or module list larger than the handoff's tables is
+    // truncated; say so instead of losing memory or a program silently (#124).
+    if boot_info.dropped_regions() > 0 {
+        warn!(
+            "boot: {} memory regions did not fit the handoff table and are unused",
+            boot_info.dropped_regions()
+        );
+    }
+    if boot_info.dropped_modules() > 0 {
+        warn!(
+            "boot: {} boot modules did not fit the handoff table and were not loaded",
+            boot_info.dropped_modules()
+        );
+    }
     debug!("boot info received at {:p}", boot_info);
 
     hal::gdt::init();
@@ -470,10 +484,12 @@ fn harden_memory(boot_info: &BootInfo) {
 
     // (range, flags) per section. `protect` adds PRESENT; .text gets neither
     // WRITABLE nor NX (R-X), the rest get NX, and .data also WRITABLE.
+    // RELRO comes after .data, which contains it: the later entry wins (#126).
     let sections = [
         (s.text, Flags::empty()),
         (s.rodata, Flags::NO_EXECUTE),
         (s.data, Flags::WRITABLE | Flags::NO_EXECUTE),
+        (s.relro, Flags::NO_EXECUTE),
     ];
     let mut pages = 0usize;
     let mut huge = 0usize;
@@ -506,7 +522,7 @@ fn harden_memory(boot_info: &BootInfo) {
     // read-only tables through it and run the result at the normal address
     // (#119). .data is writable through both mappings either way.
     let mut aliases = 0usize;
-    for (start, end) in [s.text, s.rodata] {
+    for (start, end) in [s.text, s.rodata, s.relro] {
         for v in (start..end).step_by(hal::paging::PAGE as usize) {
             let Some(phys) = aspace.translate(v) else {
                 continue;
@@ -531,13 +547,19 @@ fn harden_memory(boot_info: &BootInfo) {
     if let Some((_, f)) = aspace.query(s.data.0) {
         ok &= f.contains(Flags::NO_EXECUTE);
     }
+    // RELRO: the GOT and friends are read-only after relocation (#126).
+    if s.relro.0 < s.relro.1 {
+        ok &= aspace
+            .query(s.relro.0)
+            .is_some_and(|(_, f)| !f.contains(Flags::WRITABLE) && f.contains(Flags::NO_EXECUTE));
+    }
     if let Some(f) = aspace.top_level_flags(hhdm) {
         ok &= f.contains(Flags::NO_EXECUTE);
     }
     assert!(ok, "harden: W^X/NX invariants not satisfied");
     // The HHDM maps the same frames again: no page of .text or .rodata may be
     // writable through it, or a write there would change code (#119).
-    let aliases_read_only = [s.text, s.rodata].into_iter().all(|(start, end)| {
+    let aliases_read_only = [s.text, s.rodata, s.relro].into_iter().all(|(start, end)| {
         (start..end)
             .step_by(hal::paging::PAGE as usize)
             .filter_map(|v| aspace.translate(v))
@@ -551,7 +573,7 @@ fn harden_memory(boot_info: &BootInfo) {
         aliases_read_only,
         "harden: kernel code or read-only data is writable through the HHDM"
     );
-    info!("harden: verified - .text R-X, .rodata/.data NX, HHDM NX, no W+X");
+    info!("harden: verified - .text R-X, .rodata/RELRO R+NX, .data NX, HHDM NX, no W+X");
 }
 
 /// Unmap the stack guard pages so an overflow of a HAL-owned stack faults.

@@ -184,6 +184,8 @@ extern "C" {
     static __rodata_end: u8;
     static __data_start: u8;
     static __data_end: u8;
+    static __relro_start: u8;
+    static __relro_end: u8;
 }
 
 /// The virtual-address ranges (`start..end`, page-aligned) of the kernel's
@@ -195,8 +197,11 @@ pub struct KernelSections {
     pub text: (u64, u64),
     /// `.rodata` - read-only data (maps R, NX).
     pub rodata: (u64, u64),
-    /// `.data` + `.bss` - writable data (maps RW, NX).
+    /// `.data` + `.bss` - writable data (maps RW, NX). Starts with `relro`.
     pub data: (u64, u64),
+    /// The RELRO range at the start of `data`: relocated by the bootloader,
+    /// then read-only (maps R, NX; #126). Empty if there is nothing in it.
+    pub relro: (u64, u64),
 }
 
 /// Read the kernel's section boundaries from the linker-defined symbols.
@@ -212,6 +217,7 @@ pub fn kernel_sections() -> KernelSections {
             addr_of!(__rodata_end) as u64,
         ),
         data: (addr_of!(__data_start) as u64, addr_of!(__data_end) as u64),
+        relro: (addr_of!(__relro_start) as u64, addr_of!(__relro_end) as u64),
     }
 }
 

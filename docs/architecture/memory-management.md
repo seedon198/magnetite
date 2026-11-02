@@ -56,6 +56,7 @@ The kernel sets **and verifies** its own permissions
 |---|---|
 | `.text` | R-X |
 | `.rodata` | R + NX |
+| RELRO: `.data.rel.ro`, `.dynamic`, `.got` (#126) | R + NX, after Limine relocates |
 | `.data` / `.bss` | RW + NX |
 | HHDM (direct physical map) | RW + NX |
 | HHDM alias of `.text` / `.rodata` frames | R + NX |

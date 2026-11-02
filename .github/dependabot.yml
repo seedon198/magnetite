@@ -1,0 +1,10 @@
+# Keep the SHA-pinned GitHub Actions current (#26). Cargo dependencies are
+# reviewed by hand (cargo deny and cargo audit run in CI).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - area:ci
