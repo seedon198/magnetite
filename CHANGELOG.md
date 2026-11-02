@@ -251,6 +251,14 @@ All notable changes are documented here. The format follows
   Boot-time waits for tasks go through `thread::wait_exit`, which gives up
   after a yield budget and panics naming the task and whether it was
   blocked, instead of hanging until CI's timeout.
+- Paging (#120, #123): `map` returns `MapError::HugePage` instead of writing
+  a page-table entry into the memory a large page maps, and `map`/`protect`
+  refuse the `HUGE` bit as a leaf flag (it is PAT on a 4 KiB entry);
+  `translate` and `query` mask large-page addresses with a new
+  `PageTableEntry::huge_addr`, so a PAT bit no longer shifts the result by
+  4 KiB; `free_subtree` accepts a PAT leaf. The two `init_paging` self-test
+  spaces are now destroyed (they leaked five frames per boot), the boot
+  asserts the frame count around them, and `AddressSpace` is `#[must_use]`.
 
 ## [0.3.0] - 2026-10-28
 

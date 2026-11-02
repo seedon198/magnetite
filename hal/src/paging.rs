@@ -18,11 +18,9 @@
 use core::arch::asm;
 
 use frame_alloc::PhysFrame;
-use page_table::{
-    table_indices, PageTableEntry, PageTableFlags, ENTRY_COUNT, HUGE_1G, HUGE_2M, PAGE_SIZE,
-};
+use page_table::{table_indices, PageTableEntry, PageTableFlags, ENTRY_COUNT, PAGE_SIZE};
 
-pub use page_table::{PageTableFlags as Flags, PAGE_SIZE as PAGE};
+pub use page_table::{PageTableFlags as Flags, HUGE_1G, HUGE_2M, PAGE_SIZE as PAGE};
 
 use crate::frame;
 
@@ -41,6 +39,12 @@ pub enum MapError {
     Misaligned,
     /// A user mapping at or above [`USER_TOP`], where user code may never be.
     NotUserAddress,
+    /// The path to the address runs through a large page, which has no child
+    /// table to map into (see [`AddressSpace::split_huge`]).
+    HugePage,
+    /// The leaf flags include [`PageTableFlags::HUGE`]: on a 4 KiB entry that
+    /// bit means PAT, never a large page.
+    BadFlags,
 }
 
 /// Why a [`AddressSpace::protect`] call failed.
@@ -51,6 +55,8 @@ pub enum ProtectError {
     /// The address is mapped by a large page, which this 4 KiB-granular call
     /// cannot repermission.
     HugePage,
+    /// The flags include [`PageTableFlags::HUGE`] (PAT on a 4 KiB entry).
+    BadFlags,
 }
 
 /// The end of the mappable user range. The last page of the lower half
@@ -64,7 +70,9 @@ pub const USER_TOP: u64 = 0x7fff_ffff_f000;
 const _: () = assert!(USER_TOP < 0x8000_0000_0000);
 
 /// A virtual address space: a root PML4 and the HHDM offset used to reach its
-/// tables.
+/// tables. A user space must end in [`destroy_user`](Self::destroy_user):
+/// it has no `Drop`, and dropping one leaks its tables (#123).
+#[must_use = "a user AddressSpace must be passed to destroy_user"]
 pub struct AddressSpace {
     root: PhysFrame,
     hhdm: u64,
@@ -185,7 +193,8 @@ impl AddressSpace {
     /// Free the table at `table_phys` and everything below it. `level` 2 is a
     /// PDPT, 1 a page directory, 0 a page table, whose present entries are
     /// leaf frames. A user half holds no huge mappings (`map` makes only
-    /// 4 KiB pages), so a huge entry is a kernel bug.
+    /// 4 KiB pages), so a huge entry above the leaves is a kernel bug. At the
+    /// leaf level bit 7 is PAT, not a large page, so it is not checked there.
     fn free_subtree(&self, table_phys: u64, level: u8) -> usize {
         let mut freed = 0;
         for i in 0..ENTRY_COUNT {
@@ -193,7 +202,10 @@ impl AddressSpace {
             if !e.is_present() {
                 continue;
             }
-            assert!(!e.is_huge(), "paging: huge mapping in a user half");
+            assert!(
+                level == 0 || !e.is_huge(),
+                "paging: huge mapping in a user half"
+            );
             freed += if level == 0 {
                 frame::free_frame(PhysFrame::containing(e.addr()));
                 1
@@ -234,6 +246,9 @@ impl AddressSpace {
         }
         if flags.contains(PageTableFlags::USER) && virt >= USER_TOP {
             return Err(MapError::NotUserAddress);
+        }
+        if flags.contains(PageTableFlags::HUGE) {
+            return Err(MapError::BadFlags);
         }
         let idx = table_indices(virt);
         // Intermediate tables must be reachable with at least the leaf's
@@ -305,7 +320,7 @@ impl AddressSpace {
             return None;
         }
         if pdpte.is_huge() {
-            return Some(pdpte.addr() | (virt & ((1 << 30) - 1)));
+            return Some(pdpte.huge_addr(HUGE_1G) | (virt & (HUGE_1G - 1)));
         }
         table = pdpte.addr();
 
@@ -314,7 +329,7 @@ impl AddressSpace {
             return None;
         }
         if pde.is_huge() {
-            return Some(pde.addr() | (virt & ((1 << 21) - 1)));
+            return Some(pde.huge_addr(HUGE_2M) | (virt & (HUGE_2M - 1)));
         }
         table = pde.addr();
 
@@ -366,6 +381,9 @@ impl AddressSpace {
     /// [`ProtectError::NotMapped`] if `virt` has no leaf mapping, or
     /// [`ProtectError::HugePage`] if it is mapped by a large page.
     pub fn protect(&mut self, virt: u64, flags: PageTableFlags) -> Result<(), ProtectError> {
+        if flags.contains(PageTableFlags::HUGE) {
+            return Err(ProtectError::BadFlags);
+        }
         let idx = table_indices(virt);
         let mut table = self.root.addr();
         for &i in &idx[..3] {
@@ -474,7 +492,8 @@ impl AddressSpace {
             return None;
         }
         if pdpte.is_huge() {
-            return Some((pdpte.addr() | (virt & ((1 << 30) - 1)), pdpte.flags()));
+            let phys = pdpte.huge_addr(HUGE_1G) | (virt & (HUGE_1G - 1));
+            return Some((phys, pdpte.flags()));
         }
         table = pdpte.addr();
         let pde = self.entry(table, idx[2]);
@@ -482,7 +501,8 @@ impl AddressSpace {
             return None;
         }
         if pde.is_huge() {
-            return Some((pde.addr() | (virt & ((1 << 21) - 1)), pde.flags()));
+            let phys = pde.huge_addr(HUGE_2M) | (virt & (HUGE_2M - 1));
+            return Some((phys, pde.flags()));
         }
         table = pde.addr();
         let pte = self.entry(table, idx[3]);
@@ -603,6 +623,11 @@ impl AddressSpace {
         let ptr = self.entry_ptr(table_phys, i);
         // SAFETY: in-bounds HHDM entry of a present table.
         let e = PageTableEntry::from_bits(unsafe { ptr.read_volatile() });
+        if e.is_present() && e.is_huge() {
+            // A large page has no child table; writing into it as one would
+            // corrupt the memory it maps (#120).
+            return Err(MapError::HugePage);
+        }
         if e.is_present() {
             // Upgrade an existing intermediate so the whole path permits at
             // least `parent_flags`. U/S and R/W are cumulative across levels, so
