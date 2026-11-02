@@ -167,6 +167,12 @@ All notable changes are documented here. The format follows
   rejects any result outside 625 to 625,000 ticks/ms; on failure the kernel
   warns and keeps cooperative scheduling. A new CI boot mode, `uefi-nopit`,
   checks this.
+- `cli`, `sti`, `hlt`, `int3` and the CR4 write were marked `nomem` (#110),
+  which lets the compiler move loads and stores across them; atomic orderings
+  do not order such asm. A `SpinLock` release store could in principle be
+  scheduled after its `sti`, letting the timer interrupt spin forever on a
+  lock still marked held. They are now compiler barriers. Current codegen was
+  already correct, so no boot behaviour changes.
 
 ## [0.3.0] - 2026-10-28
 
