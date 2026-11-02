@@ -17,25 +17,18 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use ::ipc::{CapAccess, Effect, EndpointQueue, Ipc, IpcError, Message, Outcome, Received};
 use boot_info::BootInfo;
 use capability::{
-    cnode_bytes, slot_align, CapError, CapId, CapSpace, Capability, MessageInfo, ObjectKind,
-    ObjectRef, Rights,
+    cnode_bytes, mdb, slot_align, CapError, CapId, Capability, MessageInfo, ObjectKind, ObjectRef,
+    Rights,
 };
 use hal::sync::SpinLock;
 use sched::ThreadId;
 
+use crate::cspace::{self, Registry, CSPACES};
 use crate::thread::{self, CONTEXTS};
 use crate::SCHED;
 
 /// Every thread's IPC state.
 static IPC: SpinLock<Ipc> = SpinLock::new(Ipc::new());
-
-/// A thread's capability space, formed once over its CNode, and that CNode.
-type CSpace = (ObjectRef, CapSpace<'static, ObjectRef>);
-
-/// Each thread's capability space. Never re-form a live one:
-/// `hal::object::cnode_cap_space` clears the CNode it wraps.
-static CSPACES: SpinLock<[Option<CSpace>; ::ipc::MAX_THREADS]> =
-    SpinLock::new([const { None }; ::ipc::MAX_THREADS]);
 
 /// The HHDM offset, for reaching endpoint state.
 static HHDM: AtomicU64 = AtomicU64::new(0);
@@ -48,50 +41,6 @@ pub fn init(hhdm: u64) {
 /// The HHDM offset recorded by [`init`].
 pub fn hhdm() -> u64 {
     HHDM.load(Ordering::Relaxed)
-}
-
-/// Give thread `t` its capability space, formed over the CNode `cnode`.
-pub fn set_cspace(t: ThreadId, cnode: ObjectRef, space: CapSpace<'static, ObjectRef>) {
-    hal::cpu::without_interrupts(|| CSPACES.lock()[t.0] = Some((cnode, space)));
-}
-
-/// Run `f` on thread `t`'s capability space and its CNode, with interrupts
-/// off and `CSPACES` held. `None` if `t` has no capability space.
-pub fn with_cspace<R>(
-    t: ThreadId,
-    f: impl FnOnce(&mut CapSpace<'static, ObjectRef>, ObjectRef) -> R,
-) -> Option<R> {
-    hal::cpu::without_interrupts(|| {
-        let mut spaces = CSPACES.lock();
-        let (cnode, space) = spaces[t.0].as_mut()?;
-        Some(f(space, *cnode))
-    })
-}
-
-/// Take thread `t`'s capability space away (when reaping it).
-/// The first capability, in any thread's capability space, that names an
-/// object stored in physical `[start, end)`, as `(thread, slot)`. A CNode
-/// backing a capability space counts too, as slot 0. Memory may be freed only
-/// while this is `None` (#105).
-pub fn find_reference(start: u64, end: u64) -> Option<(ThreadId, CapId)> {
-    let inside = |o: ObjectRef| (start..end).contains(&o.phys);
-    hal::cpu::without_interrupts(|| {
-        let spaces = CSPACES.lock();
-        spaces.iter().enumerate().find_map(|(i, entry)| {
-            let (cnode, space) = entry.as_ref()?;
-            if inside(*cnode) {
-                return Some((ThreadId(i), CapId(0)));
-            }
-            space
-                .iter()
-                .find(|(_, c)| inside(c.object))
-                .map(|(id, _)| (ThreadId(i), id))
-        })
-    })
-}
-
-pub fn take_cspace(t: ThreadId) -> Option<(ObjectRef, CapSpace<'static, ObjectRef>)> {
-    hal::cpu::without_interrupts(|| CSPACES.lock()[t.0].take())
 }
 
 /// Send `msg` through the endpoint capability in slot `ep`, with the
@@ -153,34 +102,30 @@ pub fn exit_thread(t: ThreadId) -> Outcome {
 }
 
 /// The capability spaces as the engine sees them.
-struct Spaces<'a>(&'a mut [Option<CSpace>; ::ipc::MAX_THREADS]);
+struct Spaces<'a>(&'a mut Registry);
 
 impl CapAccess for Spaces<'_> {
     type Obj = ObjectRef;
 
     fn get(&mut self, t: ThreadId, slot: CapId) -> Result<Capability<ObjectRef>, CapError> {
-        self.0[t.0]
-            .as_ref()
-            .ok_or(CapError::OutOfRange)?
-            .1
-            .get(slot)
+        self.0.lookup(t, slot)
     }
 
     fn is_empty(&mut self, t: ThreadId, slot: CapId) -> bool {
         self.get(t, slot) == Err(CapError::Empty)
     }
 
-    fn insert_at(
+    fn transfer(
         &mut self,
-        t: ThreadId,
-        slot: CapId,
-        cap: Capability<ObjectRef>,
+        s: ThreadId,
+        src: CapId,
+        r: ThreadId,
+        dst: CapId,
     ) -> Result<(), CapError> {
-        self.0[t.0]
-            .as_mut()
-            .ok_or(CapError::OutOfRange)?
-            .1
-            .insert_at(slot, cap)
+        let from = self.0.slot(s, src)?;
+        let to = self.0.slot(r, dst)?;
+        let rights = self.0.cap(from)?.rights;
+        mdb::copy(self.0, from, to, rights)
     }
 }
 
@@ -257,6 +202,8 @@ const SERVER: ThreadId = ThreadId(5);
 const CLIENT: ThreadId = ThreadId(6);
 /// Demo threads that have finished.
 static IPC_DONE: AtomicU64 = AtomicU64::new(0);
+/// The server slot holding the demo endpoint's original capability.
+const ORIGIN: CapId = CapId(15);
 /// Stack size for each demo thread (they format log lines).
 const STACK_BYTES: usize = 16 * 1024;
 
@@ -290,26 +237,31 @@ pub fn demo(boot_info: &BootInfo) {
 
     // Each CNode was just retyped for SLOTS slots, and each gets exactly one
     // CapSpace, kept for the life of the system.
-    let mut server = hal::object::cnode_cap_space(srv, SLOTS, hhdm);
-    let mut client = hal::object::cnode_cap_space(cli, SLOTS, hhdm);
+    let server = hal::object::cnode_cap_space(srv, SLOTS, hhdm);
+    let client = hal::object::cnode_cap_space(cli, SLOTS, hhdm);
+    cspace::install(SERVER, ObjectRef::new(ObjectKind::CNode, srv), server);
+    cspace::install(CLIENT, ObjectRef::new(ObjectKind::CNode, cli), client);
+    // Every capability to the endpoint derives from one original, kept in the
+    // server's last slot (ADR 0020): the last-capability check relies on it.
     let ep = ObjectRef::new(ObjectKind::Endpoint, ep);
-    let badged = |rights, badge| Capability {
-        object: ep,
-        rights,
-        badge,
-    };
-    server.insert_at(CapId(0), badged(Rights::RECV, 0)).unwrap();
-    client
-        .insert_at(CapId(0), badged(Rights::SEND | Rights::GRANT, 7))
-        .unwrap();
-    client.insert_at(CapId(1), badged(Rights::SEND, 9)).unwrap();
+    let origin = cspace::insert_root(SERVER, ORIGIN, Capability::new(ep, Rights::ALL))
+        .expect("ipc: the endpoint's original");
     let frame = ObjectRef::new(ObjectKind::Frame, frame);
     let frame_rights = Rights::READ | Rights::WRITE | Rights::MAP;
-    client
-        .insert_at(CapId(2), Capability::new(frame, frame_rights))
-        .unwrap();
-    set_cspace(SERVER, ObjectRef::new(ObjectKind::CNode, srv), server);
-    set_cspace(CLIENT, ObjectRef::new(ObjectKind::CNode, cli), client);
+    let client_frame = cspace::insert_root(CLIENT, CapId(2), Capability::new(frame, frame_rights))
+        .expect("ipc: the client's frame");
+    cspace::with(|r| {
+        let at = |t, id| r.slot(t, id).expect("ipc: a demo slot");
+        let (srv0, cli0, cli1) = (
+            at(SERVER, CapId(0)),
+            at(CLIENT, CapId(0)),
+            at(CLIENT, CapId(1)),
+        );
+        mdb::copy(r, origin, srv0, Rights::RECV)?;
+        mdb::mint(r, origin, cli0, Rights::SEND | Rights::GRANT, 7)?;
+        mdb::mint(r, origin, cli1, Rights::SEND, 9)
+    })
+    .expect("ipc: demo capabilities");
 
     let threads: [(ThreadId, extern "C" fn() -> !); 2] =
         [(SERVER, ipc_server), (CLIENT, ipc_client)];
@@ -328,15 +280,20 @@ pub fn demo(boot_info: &BootInfo) {
     }
 
     // The refused send moved nothing: the server's second receive slot is
-    // still empty, while the frame from the call sits in the first.
-    let (first, second) = hal::cpu::without_interrupts(|| {
-        let spaces = CSPACES.lock();
-        let s = &spaces[SERVER.0].as_ref().unwrap().1;
-        (s.get(CapId(5)), s.get(CapId(6)))
+    // still empty, while the frame from the call sits in the first, derived
+    // from the client's capability that sent it.
+    let (first, second) = cspace::with(|r| {
+        let at = r.slot(SERVER, CapId(5)).expect("ipc: a demo slot");
+        let parent = r.entry(at).map(|e| (e.link.prev, e.link.depth));
+        (
+            r.cap(at).map(|c| (c.object, parent)),
+            r.lookup(SERVER, CapId(6)),
+        )
     });
-    assert!(
-        first.is_ok_and(|c| c.object == frame),
-        "ipc: frame not received"
+    assert_eq!(
+        first,
+        Ok((frame, Some((Some(client_frame), 1)))),
+        "ipc: frame not received as a child of the sender's capability"
     );
     assert_eq!(
         second,
@@ -348,9 +305,8 @@ pub fn demo(boot_info: &BootInfo) {
 
 extern "C" fn ipc_server() -> ! {
     let r = recv(CapId(0), Some(CapId(5))).expect("ipc: server receive");
-    let cap = with_cspace(SERVER, |s, _| s.get(CapId(5)))
-        .and_then(Result::ok)
-        .expect("ipc: server received a capability");
+    let cap =
+        cspace::with(|r| r.lookup(SERVER, CapId(5))).expect("ipc: server received a capability");
     crate::info!(
         "ipc: server got label={} mr={:?} badge={} cap={:?} rights={}",
         r.info.label(),

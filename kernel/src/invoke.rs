@@ -4,29 +4,40 @@
 //! [ADR 0019](../../docs/adr/0019-first-user-task.md) decision 6).
 
 use capability::abi::kind_code;
-use capability::{CapError, CapId, InvokeOk, Method, ObjectKind, SysError, MSG_REGISTERS};
+use capability::{
+    mdb, CapError, CapId, InvokeError, InvokeOk, Method, ObjectKind, SlotStore, SysError,
+    MSG_REGISTERS,
+};
 use sched::ThreadId;
 
-/// The kernel-side capability invocation entry (#57): resolve the invoked
-/// capability in `cspace`, authorize it (kind + rights), then perform the
-/// method's effect.
-///
-/// CNode methods act on the acting `cspace`: [`invoke_current`] only lets a
-/// task name its own CNode.
-pub fn invoke(
-    cspace: &mut capability::CapSpace<capability::ObjectRef>,
-    invoked: capability::CapId,
-    method: capability::Method,
-    hhdm: u64,
-) -> Result<capability::InvokeOk, capability::InvokeError> {
-    use capability::{Capability, InvokeError, InvokeOk, Method, ObjectRef, Rights};
+use crate::cspace::{self, Registry};
 
-    let cap = cspace.get(invoked).map_err(InvokeError::Cap)?;
+/// The kernel-side capability invocation entry (#57): resolve the invoked
+/// capability in CNode `cnode` of the registry, authorize it (kind + rights),
+/// then perform the method's effect. Every change to a slot goes through the
+/// mapping database (ADR 0020): a copy, a mint and a retyped object become
+/// children of the capability they came from.
+///
+/// CNode methods act on the acting CNode `cnode`: [`invoke_current`] only
+/// lets a task name its own CNode.
+pub fn invoke(
+    reg: &mut Registry,
+    cnode: u16,
+    invoked: CapId,
+    method: Method,
+    hhdm: u64,
+) -> Result<InvokeOk, InvokeError> {
+    use capability::{Capability, ObjectRef, Rights};
+
+    let slot = |reg: &Registry, id| reg.slot_in(cnode, id).map_err(InvokeError::Cap);
+    let at = slot(reg, invoked)?;
+    let cap = reg.cap(at).map_err(InvokeError::Cap)?;
     method.authorize(&cap)?;
 
     match method {
         Method::CNodeCopy { src, dst, rights } => {
-            cspace.copy(src, dst, rights).map_err(InvokeError::Cap)?;
+            let (src, dst) = (slot(reg, src)?, slot(reg, dst)?);
+            mdb::copy(reg, src, dst, rights).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeMint {
@@ -35,17 +46,18 @@ pub fn invoke(
             rights,
             badge,
         } => {
-            cspace
-                .mint(src, dst, rights, badge)
-                .map_err(InvokeError::Cap)?;
+            let (src, dst) = (slot(reg, src)?, slot(reg, dst)?);
+            mdb::mint(reg, src, dst, rights, badge).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeMove { src, dst } => {
-            cspace.move_cap(src, dst).map_err(InvokeError::Cap)?;
+            let (src, dst) = (slot(reg, src)?, slot(reg, dst)?);
+            mdb::move_entry(reg, src, dst).map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeDelete { id } => {
-            cspace.delete(id).map_err(InvokeError::Cap)?;
+            let id = slot(reg, id)?;
+            mdb::delete(reg, id).map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Done)
         }
         Method::FrameIdentify => Ok(InvokeOk::Phys(cap.object.phys)),
@@ -57,10 +69,9 @@ pub fn invoke(
             let (size, align) = kind.fixed_layout().ok_or(InvokeError::Unsupported)?;
             // Check the destination before taking any memory: a refused retype
             // must leave the Untyped as it was.
-            match cspace.get(dst) {
-                Err(CapError::Empty) => {}
-                Ok(_) => return Err(InvokeError::Cap(CapError::Occupied)),
-                Err(e) => return Err(InvokeError::Cap(e)),
+            let dst = slot(reg, dst)?;
+            if reg.get(dst).is_some() {
+                return Err(InvokeError::Cap(CapError::Occupied));
             }
             // The Untyped capability points at its control block (an `Untyped`).
             let mut ut = hal::object::load_untyped(cap.object.phys, hhdm);
@@ -68,9 +79,8 @@ pub fn invoke(
                 .ok_or(InvokeError::OutOfMemory)?;
             hal::object::store_untyped(cap.object.phys, hhdm, ut);
             let obj = ObjectRef::new(kind, base);
-            cspace
-                .insert_at(dst, Capability::new(obj, Rights::ALL))
-                .map_err(InvokeError::Cap)?;
+            mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL))
+                .map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Created(obj))
         }
     }
@@ -91,16 +101,16 @@ pub fn invoke_current(
     method: Method,
 ) -> Result<[u64; MSG_REGISTERS], SysError> {
     let hhdm = crate::ipc::hhdm();
-    crate::ipc::with_cspace(t, |cs, own| {
-        let cap = cs.get(slot).map_err(|_| SysError::InvalidCap)?;
+    cspace::with(|reg| {
+        let c = reg.of(t).ok_or(SysError::InvalidCap)?;
+        let cap = reg.lookup(t, slot).map_err(|_| SysError::InvalidCap)?;
         method.authorize(&cap)?;
-        if method.target_kind() == ObjectKind::CNode && cap.object != own {
+        if method.target_kind() == ObjectKind::CNode && cap.object != reg.object(c) {
             return Err(SysError::Unsupported);
         }
-        Ok(match invoke(cs, slot, method, hhdm)? {
+        Ok(match invoke(reg, c, slot, method, hhdm)? {
             InvokeOk::Done | InvokeOk::Created(_) => [0; MSG_REGISTERS],
             InvokeOk::Phys(_) => [kind_code(ObjectKind::Frame), hal::paging::PAGE, 0, 0],
         })
     })
-    .unwrap_or(Err(SysError::InvalidCap))
 }

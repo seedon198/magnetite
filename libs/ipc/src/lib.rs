@@ -179,7 +179,7 @@ mod tests {
         }
     }
 
-    use capability::{CapError, CapId, CapSpace, Capability, Rights, Slot};
+    use capability::{CapError, CapId, Capability, Rights};
 
     /// For tests that move no capabilities: any capability access is a bug.
     struct NoCaps;
@@ -191,7 +191,13 @@ mod tests {
         fn is_empty(&mut self, _: ThreadId, _: CapId) -> bool {
             unreachable!("no capability access expected")
         }
-        fn insert_at(&mut self, _: ThreadId, _: CapId, _: Capability<u32>) -> Result<(), CapError> {
+        fn transfer(
+            &mut self,
+            _: ThreadId,
+            _: CapId,
+            _: ThreadId,
+            _: CapId,
+        ) -> Result<(), CapError> {
             unreachable!("no capability access expected")
         }
     }
@@ -479,45 +485,50 @@ mod tests {
         assert_eq!(ipc.take_result(b), Some(Ok(None)));
     }
 
-    /// Eight threads with eight capability slots each, on real `CapSpace`s.
+    /// Eight threads with eight capability slots each.
     struct TestCaps {
-        s: [[Slot<u32>; 8]; 8],
+        s: [[Option<Capability<u32>>; 8]; 8],
     }
 
     impl TestCaps {
         fn new() -> Self {
-            Self {
-                s: [[Slot::empty(); 8]; 8],
-            }
+            Self { s: [[None; 8]; 8] }
         }
         fn put(&mut self, t: ThreadId, slot: u32, cap: Capability<u32>) {
-            CapSpace::new(&mut self.s[t.0])
-                .insert_at(CapId(slot), cap)
-                .unwrap();
+            assert!(self.s[t.0][slot as usize].replace(cap).is_none());
         }
         fn at(&mut self, t: ThreadId, slot: u32) -> Option<Capability<u32>> {
-            CapSpace::new(&mut self.s[t.0]).get(CapId(slot)).ok()
+            self.s[t.0][slot as usize]
         }
         fn del(&mut self, t: ThreadId, slot: u32) {
-            CapSpace::new(&mut self.s[t.0]).delete(CapId(slot)).unwrap();
+            self.s[t.0][slot as usize].take().unwrap();
         }
     }
 
     impl CapAccess for TestCaps {
         type Obj = u32;
         fn get(&mut self, t: ThreadId, slot: CapId) -> Result<Capability<u32>, CapError> {
-            CapSpace::new(&mut self.s[t.0]).get(slot)
+            self.s[t.0]
+                .get(slot.0 as usize)
+                .ok_or(CapError::OutOfRange)?
+                .ok_or(CapError::Empty)
         }
         fn is_empty(&mut self, t: ThreadId, slot: CapId) -> bool {
-            CapSpace::new(&mut self.s[t.0]).get(slot) == Err(CapError::Empty)
+            self.get(t, slot) == Err(CapError::Empty)
         }
-        fn insert_at(
+        fn transfer(
             &mut self,
-            t: ThreadId,
-            slot: CapId,
-            cap: Capability<u32>,
+            s: ThreadId,
+            src: CapId,
+            r: ThreadId,
+            dst: CapId,
         ) -> Result<(), CapError> {
-            CapSpace::new(&mut self.s[t.0]).insert_at(slot, cap)
+            let cap = self.get(s, src)?;
+            if !self.is_empty(r, dst) {
+                return Err(CapError::Occupied);
+            }
+            self.s[r.0][dst.0 as usize] = Some(cap);
+            Ok(())
         }
     }
 

@@ -31,12 +31,16 @@ pub trait CapAccess {
     /// Whether thread `t`'s `slot` exists and is empty (an out-of-range slot
     /// is not empty).
     fn is_empty(&mut self, t: ThreadId, slot: CapId) -> bool;
-    /// Store `cap` in thread `t`'s empty `slot`.
-    fn insert_at(
+    /// Copy the capability in thread `s`'s `src` into thread `r`'s empty
+    /// `dst`, unchanged: the same rights and badge. The copy is derived from
+    /// the sender's capability, so revoking that one takes it back too
+    /// (ADR 0020).
+    fn transfer(
         &mut self,
-        t: ThreadId,
-        slot: CapId,
-        cap: Capability<Self::Obj>,
+        s: ThreadId,
+        src: CapId,
+        r: ThreadId,
+        dst: CapId,
     ) -> Result<(), CapError>;
 }
 
@@ -490,9 +494,8 @@ impl Ipc {
     ) {
         let mut arrived = 0;
         if let (Some(src), Some(dst)) = (p.cap, slot) {
-            let cap = caps.get(s, src).expect("ipc: transfer source checked");
-            caps.insert_at(r, dst, cap)
-                .expect("ipc: transfer destination checked");
+            caps.transfer(s, src, r, dst)
+                .expect("ipc: transfer source and destination checked");
             arrived = 1;
         }
         let len = usize::from(p.msg.info.length());

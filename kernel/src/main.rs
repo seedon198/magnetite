@@ -15,6 +15,7 @@ extern crate alloc;
 mod banner;
 mod boot;
 mod console;
+mod cspace;
 mod invoke;
 mod ipc;
 mod log;
@@ -851,7 +852,9 @@ fn demo_untyped(boot_info: &BootInfo) {
 /// an attenuated (SEND-only) copy and verify the rights.
 fn demo_capabilities(boot_info: &BootInfo) {
     use capability::Untyped;
-    use capability::{cnode_bytes, slot_align, CapId, Capability, ObjectKind, ObjectRef, Rights};
+    use capability::{
+        cnode_bytes, mdb, slot_align, Capability, ObjectKind, ObjectRef, Rights, SlotRef,
+    };
 
     const CNODE_SLOTS: usize = 16;
 
@@ -873,7 +876,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
     };
     // `cnode_phys` is a CNode just retyped for CNODE_SLOTS slots (our exclusive
     // HHDM-mapped storage), and we form exactly one CapSpace over it.
-    let mut cspace = hal::object::cnode_cap_space(cnode_phys, CNODE_SLOTS, hhdm);
+    let space = hal::object::cnode_cap_space(cnode_phys, CNODE_SLOTS, hhdm);
 
     // Retype an Endpoint and a Notification.
     let (esz, eal) = ObjectKind::Endpoint.fixed_layout().unwrap();
@@ -891,23 +894,34 @@ fn demo_capabilities(boot_info: &BootInfo) {
         ObjectRef::new(ObjectKind::Notification, nt_phys),
         Rights::ALL,
     );
-    let ep_id = cspace.insert(ep).unwrap();
-    let _nt_id = cspace.insert(nt).unwrap();
+    let capacity = space.capacity();
+    let (full, weak, child_of) = cspace::with(|r| {
+        let c = r
+            .register(ObjectRef::new(ObjectKind::CNode, cnode_phys), space)
+            .expect("caps: the CNode registry is full");
+        let (ep_at, nt_at, weak_at) = (SlotRef::new(c, 0), SlotRef::new(c, 1), SlotRef::new(c, 10));
+        mdb::insert_root(r, ep_at, ep).unwrap();
+        mdb::insert_root(r, nt_at, nt).unwrap();
+        // Derive an attenuated SEND-only copy of the endpoint cap into another slot.
+        mdb::copy(r, ep_at, weak_at, Rights::SEND).unwrap();
+        let found = (
+            r.cap(ep_at).unwrap(),
+            r.cap(weak_at).unwrap(),
+            r.entry(weak_at).unwrap().link.prev == Some(ep_at),
+        );
+        r.remove(c);
+        found
+    });
 
-    // Derive an attenuated SEND-only copy of the endpoint cap into another slot.
-    cspace.copy(ep_id, CapId(10), Rights::SEND).unwrap();
-
-    let full = cspace.get(ep_id).unwrap();
-    let weak = cspace.get(CapId(10)).unwrap();
     let ok = full.allows(Rights::SEND | Rights::RECV)
         && weak.allows(Rights::SEND)
         && !weak.allows(Rights::RECV)
-        && weak.object == full.object;
+        && weak.object == full.object
+        && child_of;
     assert!(ok, "attenuated capability derivation is wrong");
 
     info!(
-        "caps: CNode cap space ({} slots) holds endpoint+notification; SEND-only copy attenuated & verified",
-        cspace.capacity()
+        "caps: CNode cap space ({capacity} slots) holds endpoint+notification; SEND-only copy attenuated & verified"
     );
 
     hal::frame::free_frame(frame);
@@ -918,8 +932,8 @@ fn demo_capabilities(boot_info: &BootInfo) {
 /// a Notification.
 fn demo_invoke(boot_info: &BootInfo) {
     use capability::{
-        cnode_bytes, slot_align, CapId, Capability, InvokeError, InvokeOk, Method, ObjectKind,
-        ObjectRef, Rights, Untyped,
+        cnode_bytes, mdb, slot_align, CapId, Capability, InvokeError, InvokeOk, Method, ObjectKind,
+        ObjectRef, Rights, SlotRef, Untyped,
     };
 
     const SLOTS: usize = 16;
@@ -956,65 +970,83 @@ fn demo_invoke(boot_info: &BootInfo) {
         Untyped::new(region.addr(), hal::paging::PAGE),
     );
 
-    let mut cs = hal::object::cnode_cap_space(cnode_phys, SLOTS, hhdm);
-    let ut_id = cs
-        .insert(Capability::new(
-            ObjectRef::new(ObjectKind::Untyped, uctrl_phys),
-            Rights::ALL,
-        ))
-        .unwrap();
-    let nt_id = cs
-        .insert(Capability::new(
+    let space = hal::object::cnode_cap_space(cnode_phys, SLOTS, hhdm);
+    let (ut_id, nt_id) = (CapId(0), CapId(1));
+    cspace::with(|r| {
+        let c = r
+            .register(ObjectRef::new(ObjectKind::CNode, cnode_phys), space)
+            .expect("invoke: the CNode registry is full");
+        let ut = Capability::new(ObjectRef::new(ObjectKind::Untyped, uctrl_phys), Rights::ALL);
+        let nt = Capability::new(
             ObjectRef::new(ObjectKind::Notification, notif_phys),
             Rights::ALL,
-        ))
-        .unwrap();
+        );
+        mdb::insert_root(r, SlotRef::new(c, 0), ut).unwrap();
+        mdb::insert_root(r, SlotRef::new(c, 1), nt).unwrap();
 
-    // 1) Retype a Frame from the Untyped, through invoke.
-    let created = invoke::invoke(
-        &mut cs,
-        ut_id,
-        Method::UntypedRetype {
-            kind: ObjectKind::Frame,
-            count: 1,
-            dst: CapId(5),
-        },
-        hhdm,
-    );
-    let frame_phys = match created {
-        Ok(InvokeOk::Created(obj)) => obj.phys,
-        other => panic!("invoke: retype returned {other:?}"),
-    };
+        // 1) Retype a Frame from the Untyped, through invoke.
+        let created = invoke::invoke(
+            r,
+            c,
+            ut_id,
+            Method::UntypedRetype {
+                kind: ObjectKind::Frame,
+                count: 1,
+                dst: CapId(5),
+            },
+            hhdm,
+        );
+        let frame_phys = match created {
+            Ok(InvokeOk::Created(obj)) => obj.phys,
+            other => panic!("invoke: retype returned {other:?}"),
+        };
+        // The new Frame's capability is a child of the Untyped's (ADR 0020).
+        let link = r.entry(SlotRef::new(c, 5)).unwrap().link;
+        assert_eq!((link.prev, link.depth), (Some(SlotRef::new(c, 0)), 1));
 
-    // 2) Identify the new Frame.
-    let identified = invoke::invoke(&mut cs, CapId(5), Method::FrameIdentify, hhdm);
-    assert_eq!(identified, Ok(InvokeOk::Phys(frame_phys)));
+        // 2) Identify the new Frame.
+        let identified = invoke::invoke(r, c, CapId(5), Method::FrameIdentify, hhdm);
+        assert_eq!(identified, Ok(InvokeOk::Phys(frame_phys)));
 
-    // 3) Rights denied: a copy of the Untyped cap without RETYPE cannot retype.
-    cs.copy(ut_id, CapId(6), Rights::WRITE).unwrap();
-    let denied = invoke::invoke(
-        &mut cs,
-        CapId(6),
-        Method::UntypedRetype {
-            kind: ObjectKind::Frame,
-            count: 1,
-            dst: CapId(7),
-        },
-        hhdm,
-    );
-    assert_eq!(denied, Err(InvokeError::InsufficientRights));
+        // 3) Rights denied: a copy of the Untyped cap without RETYPE cannot retype.
+        let copy = Method::CNodeCopy {
+            src: ut_id,
+            dst: CapId(6),
+            rights: Rights::WRITE,
+        };
+        let cnode_cap = Capability::new(r.object(c), Rights::WRITE);
+        mdb::insert_root(r, SlotRef::new(c, 15), cnode_cap).unwrap();
+        assert_eq!(
+            invoke::invoke(r, c, CapId(15), copy, hhdm),
+            Ok(InvokeOk::Done)
+        );
+        let denied = invoke::invoke(
+            r,
+            c,
+            CapId(6),
+            Method::UntypedRetype {
+                kind: ObjectKind::Frame,
+                count: 1,
+                dst: CapId(7),
+            },
+            hhdm,
+        );
+        assert_eq!(denied, Err(InvokeError::InsufficientRights));
 
-    // 4) Signal the Notification, then confirm the bits landed.
-    let _ = invoke::invoke(
-        &mut cs,
-        nt_id,
-        Method::NotificationSignal { bits: 0b1010 },
-        hhdm,
-    );
-    assert_eq!(
-        hal::object::notification_pending(notif_phys, hhdm) & 0b1010,
-        0b1010
-    );
+        // 4) Signal the Notification, then confirm the bits landed.
+        let _ = invoke::invoke(
+            r,
+            c,
+            nt_id,
+            Method::NotificationSignal { bits: 0b1010 },
+            hhdm,
+        );
+        assert_eq!(
+            hal::object::notification_pending(notif_phys, hhdm) & 0b1010,
+            0b1010
+        );
+        r.remove(c);
+    });
 
     info!("invoke: retype->frame, identify, rights-denied, and signal all behaved correctly");
 

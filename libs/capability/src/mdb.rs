@@ -25,7 +25,8 @@
 //! every object except an Untyped region, whose memory is reclaimed by revoke
 //! instead.
 
-use crate::Capability;
+use crate::space::CapError;
+use crate::{Capability, Rights};
 
 /// The most deletions one revoke call makes before it returns
 /// [`SysError::Again`](crate::SysError), bounding the work done with
@@ -291,6 +292,51 @@ pub fn move_entry<Obj: Copy, S: SlotStore<Obj> + ?Sized>(
         set_prev(store, n, Some(to));
     }
     Ok(())
+}
+
+/// Copy the capability at `src` into the empty slot `dst` as its child,
+/// **attenuated** to `mask` rights.
+///
+/// # Errors
+/// [`CapError::NotPermitted`] if `mask` is not a subset of the source's
+/// rights (a copy can only weaken), or the source's tree is too deep;
+/// [`CapError::Empty`] or [`CapError::Occupied`] for the slots.
+pub fn copy<Obj: Copy, S: SlotStore<Obj> + ?Sized>(
+    store: &mut S,
+    src: SlotRef,
+    dst: SlotRef,
+    mask: Rights,
+) -> Result<(), CapError> {
+    let from = store.get(src).ok_or(CapError::Empty)?;
+    let derived = from.cap.derive(mask).ok_or(CapError::NotPermitted)?;
+    Ok(insert_child(store, src, dst, derived)?)
+}
+
+/// Like [`copy`], but also set a `badge` on the new capability (mint).
+///
+/// # Errors
+/// As for [`copy`], and [`CapError::NotPermitted`] if the badge rule is
+/// violated (re-badging a badged capability).
+pub fn mint<Obj: Copy, S: SlotStore<Obj> + ?Sized>(
+    store: &mut S,
+    src: SlotRef,
+    dst: SlotRef,
+    mask: Rights,
+    badge: u64,
+) -> Result<(), CapError> {
+    let from = store.get(src).ok_or(CapError::Empty)?;
+    let minted = from.cap.mint(mask, badge).ok_or(CapError::NotPermitted)?;
+    Ok(insert_child(store, src, dst, minted)?)
+}
+
+impl From<MdbError> for CapError {
+    fn from(e: MdbError) -> Self {
+        match e {
+            MdbError::Empty => CapError::Empty,
+            MdbError::Occupied => CapError::Occupied,
+            MdbError::TooDeep => CapError::NotPermitted,
+        }
+    }
 }
 
 #[cfg(test)]

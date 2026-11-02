@@ -12,7 +12,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use boot_info::BootInfo;
-use capability::{cnode_bytes, CapId, Capability, ObjectKind, ObjectRef, Rights, Untyped};
+use capability::{
+    cnode_bytes, mdb, CapId, Capability, ObjectKind, ObjectRef, Rights, SlotRef, Untyped,
+};
 use elf::ElfError;
 use hal::frame::PhysFrame;
 use hal::paging::{AddressSpace, Flags, PAGE};
@@ -20,7 +22,7 @@ use hal::syscall::UserEntry;
 use sched::ThreadId;
 
 use crate::thread::{self, CONTEXTS};
-use crate::{boot, console, KERNEL_SPACE, SCHED};
+use crate::{boot, console, cspace, KERNEL_SPACE, SCHED};
 
 /// The top of every task's stack.
 pub const STACK_TOP: u64 = 0x7fff_ffff_0000;
@@ -156,15 +158,12 @@ pub struct Bootstrap {
 /// Create the root task as thread `t` (ADR 0019 decision 7): a 64-slot CNode
 /// holding exactly its CNode (slot 1, `READ|WRITE`), 64 KiB of Untyped memory
 /// (slot 2, `RETYPE`) and a send-only console capability with badge 1
-/// (slot 3), with slot 0 empty; then load `image` into it.
+/// (slot 3), minted from the console endpoint's original at `console`, with
+/// slot 0 empty; then load `image` into it.
 ///
 /// # Errors
 /// Memory ran out or the image was refused; nothing of the task remains.
-pub fn bootstrap_root(
-    t: ThreadId,
-    console: ObjectRef,
-    image: &[u8],
-) -> Result<Bootstrap, LoadError> {
+pub fn bootstrap_root(t: ThreadId, console: SlotRef, image: &[u8]) -> Result<Bootstrap, LoadError> {
     let hhdm = crate::ipc::hhdm();
     assert!(cnode_bytes(ROOT_SLOTS) as u64 <= PAGE);
     let (Some(cnode), Some(control)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame())
@@ -185,9 +184,10 @@ pub fn bootstrap_root(
     hal::object::store_untyped(control.addr(), hhdm, Untyped::new(untyped.addr(), region));
 
     // `cnode` is a fresh frame, ours alone, and gets exactly one CapSpace.
-    let mut space = hal::object::cnode_cap_space(cnode.addr(), ROOT_SLOTS, hhdm);
+    let space = hal::object::cnode_cap_space(cnode.addr(), ROOT_SLOTS, hhdm);
     let own = ObjectRef::new(ObjectKind::CNode, cnode.addr());
-    let caps = [
+    cspace::install(t, own, space);
+    let roots = [
         (1, Capability::new(own, Rights::READ | Rights::WRITE)),
         (
             2,
@@ -196,21 +196,17 @@ pub fn bootstrap_root(
                 Rights::RETYPE,
             ),
         ),
-        (
-            3,
-            Capability {
-                object: console,
-                rights: Rights::SEND,
-                badge: console::ROOT_BADGE,
-            },
-        ),
     ];
-    for (slot, cap) in caps {
-        space.insert_at(CapId(slot), cap).expect("task: root slot");
+    for (slot, cap) in roots {
+        cspace::insert_root(t, CapId(slot), cap).expect("task: root slot");
     }
-    crate::ipc::set_cspace(t, own, space);
+    cspace::with(|r| {
+        let at = r.slot(t, CapId(3))?;
+        mdb::mint(r, console, at, Rights::SEND, console::ROOT_BADGE)
+    })
+    .expect("task: root console slot");
     if let Err(e) = spawn(t, ROOT_STACK_SLOT, image) {
-        crate::ipc::take_cspace(t);
+        cspace::release(t);
         if reclaim_memory(boot).is_err() {
             crate::warn!("task: a refused root task's memory is still named; kept");
         }
@@ -222,8 +218,8 @@ pub fn bootstrap_root(
 /// Memory behind an exited task's capabilities that something still names, so
 /// it was not freed: the capability that holds it, and the memory to retry.
 pub struct Unreclaimed {
-    /// The thread and slot of a capability into the task's memory.
-    pub holder: (ThreadId, CapId),
+    /// A capability into the task's memory.
+    pub holder: SlotRef,
     /// The task's memory, still allocated.
     pub boot: Bootstrap,
 }
@@ -239,7 +235,7 @@ pub struct Unreclaimed {
 /// reclaimed either way; retry the memory with [`reclaim_memory`].
 pub fn reap_root(t: ThreadId, boot: Bootstrap) -> Result<usize, Unreclaimed> {
     let freed = thread::reap(t);
-    crate::ipc::take_cspace(t);
+    cspace::release(t);
     reclaim_memory(boot).map(|n| n + freed)
 }
 
@@ -256,7 +252,7 @@ pub fn reclaim_memory(boot: Bootstrap) -> Result<usize, Unreclaimed> {
         (untyped, untyped + ROOT_UNTYPED_FRAMES as u64 * PAGE),
     ];
     for (start, end) in regions {
-        if let Some(holder) = crate::ipc::find_reference(start, end) {
+        if let Some(holder) = cspace::with(|r| r.find_reference(start, end)) {
             return Err(Unreclaimed { holder, boot });
         }
     }
@@ -316,7 +312,7 @@ fn fault_demo(fault: &[u8]) {
 }
 
 /// The root task, talking to the console server over IPC.
-fn root_demo(console: ObjectRef, root: &[u8]) {
+fn root_demo(console: SlotRef, root: &[u8]) {
     let before = free_frames();
     let boot = match bootstrap_root(ROOT, console, root) {
         Ok(boot) => boot,
@@ -336,7 +332,7 @@ fn root_demo(console: ObjectRef, root: &[u8]) {
         "task: the root task did not report its checks passed"
     );
     let hhdm = crate::ipc::hhdm();
-    let signalled = crate::ipc::with_cspace(ROOT, |cs, _| {
+    let signalled = cspace::with_space(ROOT, |cs, _| {
         cs.get(CapId(4)).is_ok_and(|c| {
             c.object.kind == ObjectKind::Notification
                 && hal::object::notification_pending(c.object.phys, hhdm) == 0b101
@@ -351,16 +347,16 @@ fn root_demo(console: ObjectRef, root: &[u8]) {
     // plant one into root's Untyped region in the console server's space, as
     // a GRANT would, and the memory must stay allocated until it is gone.
     let planted = ObjectRef::new(ObjectKind::Endpoint, boot.untyped.addr() + 2 * PAGE);
-    let slot = crate::ipc::with_cspace(CONSOLE, |cs, _| {
-        cs.insert(Capability::new(planted, Rights::SEND))
-    })
-    .flatten()
-    .expect("task: the console server has a free slot");
+    let slot = cspace::with_space(CONSOLE, |cs, _| cs.first_empty())
+        .flatten()
+        .expect("task: the console server has a free slot");
+    let held = cspace::insert_root(CONSOLE, slot, Capability::new(planted, Rights::SEND))
+        .expect("task: plant a capability");
     let Err(kept) = reap_root(ROOT, boot) else {
         panic!("task: freed memory that a capability still names");
     };
-    assert_eq!(kept.holder, (CONSOLE, slot), "task: wrong holder reported");
-    crate::ipc::with_cspace(CONSOLE, |cs, _| cs.delete(slot)).map(|r| r.expect("planted"));
+    assert_eq!(kept.holder, held, "task: wrong holder reported");
+    cspace::with(|r| mdb::delete(r, held)).expect("planted");
     if reclaim_memory(kept.boot).is_err() {
         panic!("task: memory still held after its last capability went");
     }
