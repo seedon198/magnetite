@@ -75,6 +75,23 @@ pub fn init(regions: &[Region], hhdm_offset: u64) -> bool {
     true
 }
 
+/// Whether every frame touched by `[phys, phys + len)` is an allocated pool
+/// frame (`false` before init). `hal::object` checks this before it writes
+/// through the HHDM, so safe kernel code cannot aim it at memory the kernel
+/// does not own, such as its image, the bitmap or MMIO (#106).
+#[must_use]
+pub fn owns(phys: u64, len: u64) -> bool {
+    let Some(end) = phys.checked_add(len.max(1)) else {
+        return false;
+    };
+    let guard = ALLOCATOR.lock();
+    let Some(alloc) = guard.as_ref() else {
+        return false;
+    };
+    (phys / FRAME_SIZE..end.div_ceil(FRAME_SIZE))
+        .all(|i| alloc.is_allocated(PhysFrame::containing(i * FRAME_SIZE)))
+}
+
 /// Allocate one zeroed physical frame, or `None` if none are free or the
 /// allocator is not initialized.
 pub fn alloc_frame() -> Option<PhysFrame> {

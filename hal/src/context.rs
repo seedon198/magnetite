@@ -98,6 +98,35 @@ extern "C" {
     fn thread_start() -> !;
 }
 
+/// Leave the current stack for good: switch to the stack whose top is `top`
+/// and call `f(arg)` there, with `rbp` zeroed so backtraces end at `f`. Used
+/// to move `kmain` off the bootloader's stack onto a guarded kernel stack
+/// (#66).
+///
+/// # Panics
+/// If the word just below `top` is not mapped.
+pub fn run_on_stack(top: u64, f: extern "C" fn(u64) -> !, arg: u64) -> ! {
+    assert!(
+        top.is_multiple_of(16) && !crate::fault::probe_read(top - 8),
+        "context: run_on_stack needs a mapped, 16-byte-aligned stack top"
+    );
+    // SAFETY: `top` is 16-byte aligned with mapped memory below it (checked
+    // above; the caller owns that stack and nothing else uses it). Nothing on
+    // the old stack is used again: `f` never returns.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {top}",
+            "xor ebp, ebp",
+            "call {f}",
+            "ud2",
+            top = in(reg) top,
+            f = in(reg) f,
+            in("rdi") arg,
+            options(noreturn),
+        )
+    }
+}
+
 // Save callee-saved registers on the current stack, store the resulting rsp
 // through `rdi`, load `rsi` as the new rsp, restore callee-saved registers, and
 // `ret` into the resumed thread. Pop order mirrors the push order reversed, so

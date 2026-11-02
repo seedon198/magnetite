@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use boot_info::BootInfo;
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use hal::paging::{AddressSpace, Flags, MapError};
 use hal::serial::SerialPort;
 use hal::sync::SpinLock;
@@ -39,6 +39,11 @@ use thread::CONTEXTS;
 static KERNEL_SPACE: SpinLock<Option<AddressSpace>> = SpinLock::new(None);
 
 /// The kernel heap (#41). Backed by frames mapped on demand by [`heap_grow`].
+///
+/// A failed infallible allocation (`Box::new` and the like) reaches our panic
+/// handler with "memory allocation of N bytes failed" and a backtrace: on
+/// stable `no_std`, the default allocation-error handler panics, so kernel
+/// OOM is already legible and no handler of our own is needed (#68).
 #[global_allocator]
 static HEAP: hal::heap::KernelHeap = hal::heap::KernelHeap::new();
 
@@ -165,12 +170,38 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // recoverable-probe + classification path.
     init_fault_diagnostics(boot_info);
 
+    // Leave the bootloader's stack, which has no guard page, for a kernel stack
+    // that does: an overflow during the rest of boot faults and is named
+    // (#66). The boot thread then idles on this stack for good.
+    SMEP_SMAP.store(u8::from(smep) | u8::from(smap) << 1, Ordering::Relaxed);
+    let top = thread::alloc_kernel_stack(thread::BOOT_STACK_SLOT)
+        .expect("boot: no frames for the boot thread's kernel stack");
+    hal::context::run_on_stack(top, kmain_guarded, 0)
+}
+
+/// Whether SMEP and SMAP were enabled (bits 0 and 1), for the `ready:` line.
+static SMEP_SMAP: AtomicU8 = AtomicU8::new(0);
+
+/// The rest of boot, on the boot thread's guarded kernel stack.
+extern "C" fn kmain_guarded(_: u64) -> ! {
+    let boot_info = boot::info();
+    let flags = SMEP_SMAP.load(Ordering::Relaxed);
+    let (smep, smap) = (flags & 1 != 0, flags & 2 != 0);
+
     // Per-thread kernel stacks (#82): each sits above an unmapped guard page.
     assert!(
         thread::selftest(),
         "thread: kernel stack guard page check failed"
     );
     info!("thread: kernel stack guard page verified");
+
+    // The boot thread runs on a kernel stack with a guard page below it, so
+    // an overflow faults instead of corrupting memory (#66).
+    assert_eq!(
+        hal::fault::classify(hal::cpu::stack_pointer()),
+        Some("kernel stack"),
+        "boot: kmain is not on a guarded kernel stack"
+    );
 
     // Untyped memory & retype (M3, #55): demonstrate carving object storage
     // from an Untyped region with watermark accounting.

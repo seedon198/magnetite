@@ -225,12 +225,29 @@ impl AddressSpace {
 
     /// Install this address space in `CR3`, making its mappings active.
     ///
-    /// Sound because every `AddressSpace` maps the kernel higher half by
-    /// construction, so the currently-executing kernel, its stack, and the
-    /// HHDM remain mapped across the switch.
+    /// Every `AddressSpace` maps the kernel higher half by construction
+    /// (`new_kernel` inherits it and `new_user` copies it), so the running
+    /// kernel, its stack and the HHDM stay mapped across the switch. A safe
+    /// function cannot rest on that alone (#67): it checks that this space
+    /// maps the code doing the switch, the current stack and its own root
+    /// through the HHDM, and panics before loading `CR3` otherwise, rather
+    /// than triple-fault after.
+    ///
+    /// # Panics
+    /// If this space does not map the current code, stack or HHDM.
     pub fn switch(&self) {
-        // SAFETY: `root` is a valid PML4 that maps the kernel higher half (see
-        // the type invariant), so execution continues correctly after the load.
+        let code = Self::switch as *const () as u64;
+        let stack = crate::cpu::stack_pointer();
+        let tables = self.hhdm + self.root.addr();
+        assert!(
+            [code, stack, tables]
+                .iter()
+                .all(|&va| self.translate(va).is_some()),
+            "paging: switching to an address space that does not map the kernel"
+        );
+        // SAFETY: `root` is a valid PML4 that maps the code executing now, the
+        // current stack and the HHDM (checked above), so execution continues
+        // correctly after the load.
         unsafe { write_cr3(self.root.addr()) }
     }
 

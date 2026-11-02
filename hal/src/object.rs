@@ -9,6 +9,18 @@
 use capability::object::{EndpointState, ObjectRef, Untyped};
 use capability::space::{CapSpace, Slot};
 
+/// Panic unless `[phys, phys + len)` lies in allocated pool frames. Every
+/// access below writes or reads through `hhdm + phys`, so this keeps safe
+/// kernel code from aiming one at memory nobody allocated: the kernel image,
+/// the frame bitmap, MMIO (#106). It cannot tell one live object from
+/// another; typed object references from the CNode registry (ADR 0020) will.
+fn check(phys: u64, len: usize) {
+    assert!(
+        crate::frame::owns(phys, len as u64),
+        "object: {phys:#x}+{len:#x} is not allocated object memory"
+    );
+}
+
 /// Carve `count` objects of `size` bytes each (aligned to `align`) from
 /// `untyped`, **zero** their storage, and return the physical base of the
 /// first. Returns `None` if the request is malformed or does not fit; on
@@ -19,6 +31,7 @@ use capability::space::{CapSpace, Slot};
 pub fn retype(untyped: &mut Untyped, size: u64, align: u64, count: u64, hhdm: u64) -> Option<u64> {
     let base = untyped.allocate(size, align, count)?;
     let len = (size * count) as usize;
+    check(base, len);
     let ptr = (hhdm + base) as *mut u8;
     // SAFETY: `base .. base + size*count` was just carved from `untyped` by
     // `allocate` (which checked it lies within the region), so it is backing
@@ -44,6 +57,7 @@ pub fn retype(untyped: &mut Untyped, size: u64, align: u64, count: u64, hhdm: u6
 /// wrapper over internal `unsafe`, like the other HHDM-backed HAL constructors.)
 #[must_use]
 pub fn cnode_cap_space(phys: u64, slots: usize, hhdm: u64) -> CapSpace<'static, ObjectRef> {
+    check(phys, slots * core::mem::size_of::<Slot<ObjectRef>>());
     let ptr = (hhdm + phys) as *mut Slot<ObjectRef>;
     // SAFETY: per the caller contract above, `ptr .. ptr + slots` is our
     // exclusively-owned, HHDM-mapped CNode storage. We `write` (not read)
@@ -64,6 +78,7 @@ pub fn cnode_cap_space(phys: u64, slots: usize, hhdm: u64) -> CapSpace<'static, 
 /// [`store_untyped`]); safe wrapper over internal `unsafe`.
 #[must_use]
 pub fn load_untyped(phys: u64, hhdm: u64) -> Untyped {
+    check(phys, core::mem::size_of::<Untyped>());
     let ptr = (hhdm + phys) as *const Untyped;
     // SAFETY: per the contract, `phys` holds a valid, aligned `Untyped` in our
     // HHDM-mapped RAM; `Untyped` is `repr(C)` and `Copy`, so this read is sound.
@@ -75,6 +90,7 @@ pub fn load_untyped(phys: u64, hhdm: u64) -> Untyped {
 /// The caller must own the storage at `phys` (a control block sized for an
 /// `Untyped`); safe wrapper over internal `unsafe`.
 pub fn store_untyped(phys: u64, hhdm: u64, untyped: Untyped) {
+    check(phys, core::mem::size_of::<Untyped>());
     let ptr = (hhdm + phys) as *mut Untyped;
     // SAFETY: as in `load_untyped`; the caller owns aligned storage for one
     // `repr(C)` `Untyped` at `phys`.
@@ -89,6 +105,7 @@ pub fn store_untyped(phys: u64, hhdm: u64, untyped: Untyped) {
 /// internal `unsafe`.
 #[must_use]
 pub fn load_endpoint(phys: u64, hhdm: u64) -> EndpointState {
+    check(phys, core::mem::size_of::<EndpointState>());
     let ptr = (hhdm + phys) as *const EndpointState;
     // SAFETY: per the contract, `phys` is an Endpoint's retyped storage in our
     // HHDM-mapped RAM, sized and aligned for `EndpointState` (its fixed
@@ -102,6 +119,7 @@ pub fn load_endpoint(phys: u64, hhdm: u64) -> EndpointState {
 /// The caller must pass a retyped Endpoint's storage, as for
 /// [`load_endpoint`]; safe wrapper over internal `unsafe`.
 pub fn store_endpoint(phys: u64, hhdm: u64, state: EndpointState) {
+    check(phys, core::mem::size_of::<EndpointState>());
     let ptr = (hhdm + phys) as *mut EndpointState;
     // SAFETY: as in `load_endpoint`; the caller owns that aligned,
     // `EndpointState`-sized storage at `phys`.
@@ -111,6 +129,7 @@ pub fn store_endpoint(phys: u64, hhdm: u64, state: EndpointState) {
 /// OR `bits` into the signal word of the Notification whose state lives at
 /// physical `phys` (the first `u64` of its `NotificationState`), via the HHDM.
 pub fn notification_signal(phys: u64, bits: u64, hhdm: u64) {
+    check(phys, 8);
     let ptr = (hhdm + phys) as *mut u64;
     // SAFETY: `phys` is a Notification's retyped, zeroed state (its first field
     // is the `u64` signal word) in our HHDM-mapped RAM; read-modify-write of
@@ -125,6 +144,7 @@ pub fn notification_signal(phys: u64, bits: u64, hhdm: u64) {
 /// physical `phys`, via the HHDM.
 #[must_use]
 pub fn notification_pending(phys: u64, hhdm: u64) -> u64 {
+    check(phys, 8);
     let ptr = (hhdm + phys) as *const u64;
     // SAFETY: `phys` is a Notification's retyped state in HHDM-mapped RAM; its
     // first field is the `u64` signal word, valid to read.
@@ -137,6 +157,7 @@ pub fn notification_pending(phys: u64, hhdm: u64) -> u64 {
 /// The caller must own `[phys, phys + bytes.len())` (e.g. a frame just
 /// allocated) and keep `bytes.len()` within it.
 pub fn write_phys(phys: u64, hhdm: u64, bytes: &[u8]) {
+    check(phys, bytes.len());
     let dst = (hhdm + phys) as *mut u8;
     // SAFETY: per the contract, `[phys, phys+len)` is our HHDM-mapped RAM; the
     // source and destination do not overlap (source is a kernel buffer).

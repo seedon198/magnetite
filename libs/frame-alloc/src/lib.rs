@@ -264,6 +264,14 @@ impl<'a> FrameAllocator<'a> {
         Ok(())
     }
 
+    /// Whether `frame` is a pool frame that is allocated now: what memory the
+    /// kernel may treat as its own object storage (#106).
+    #[must_use]
+    pub fn is_allocated(&self, frame: PhysFrame) -> bool {
+        let i = frame.index();
+        i < self.frames && self.pool[i / 64] & (1 << (i % 64)) != 0 && self.is_used(i)
+    }
+
     /// Total number of frames tracked (including never-usable ones).
     #[must_use]
     pub const fn total_frames(&self) -> usize {
@@ -421,6 +429,25 @@ mod tests {
         let f = a.alloc().unwrap();
         assert_eq!(a.free(f), Ok(()));
         assert_eq!(a.free(f), Err(FreeError::AlreadyFree));
+    }
+
+    #[test]
+    fn is_allocated_means_in_the_pool_and_in_use() {
+        let mut bitmap = [0u64; 2];
+        let regions = [usable(0, 32 * FRAME_SIZE)];
+        let mut a = FrameAllocator::new(&mut bitmap, 32, &regions, &[(0, FRAME_SIZE)]);
+        let f = a.alloc().unwrap();
+        assert!(a.is_allocated(f));
+        a.free(f).unwrap();
+        assert!(!a.is_allocated(f), "a free frame");
+        assert!(
+            !a.is_allocated(PhysFrame::from_index(0)),
+            "a reserved frame"
+        );
+        assert!(
+            !a.is_allocated(PhysFrame::from_index(40)),
+            "an untracked frame"
+        );
     }
 
     #[test]

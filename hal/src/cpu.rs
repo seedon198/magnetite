@@ -55,6 +55,15 @@ pub fn enable_interrupts() {
     }
 }
 
+/// The current stack pointer.
+#[must_use]
+pub fn stack_pointer() -> u64 {
+    let rsp: u64;
+    // SAFETY: copies `rsp` into a register; no memory access, no side effects.
+    unsafe { asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    rsp
+}
+
 /// Whether maskable interrupts are currently enabled (RFLAGS.IF).
 #[must_use]
 pub fn interrupts_enabled() -> bool {

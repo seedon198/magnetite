@@ -81,6 +81,13 @@ Links are never raw pointers, so the database stays in safe Rust: the pure
 crate resolves a `SlotRef` through the registry, and nothing aliases a
 `CapSpace`'s slots.
 
+The registry also issues **typed object references** (`EndpointRef`,
+`CNodeRef`, and so on), and `hal::object` takes those instead of bare
+physical addresses. A physical address of one kind can then no longer be
+used as another, and `cnode_cap_space` consumes its `CNodeRef` instead of
+handing out an aliasable `CapSpace<'static>` (the rest of #106; until then,
+every `hal::object` access checks that it lies in allocated pool frames).
+
 Invariant: the list is a pre-order walk of the derivation tree. The children
 of an entry at depth `d` are the following entries at depth `d + 1`, up to
 the first entry at depth `<= d`.

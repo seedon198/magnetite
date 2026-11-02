@@ -25,6 +25,30 @@ use limine::request::{
 };
 use limine::BaseRevision;
 
+use core::sync::atomic::{AtomicPtr, Ordering};
+
+/// `_start`'s [`BootInfo`], for [`info`] once `kmain` has left the bootloader's
+/// stack (#66).
+static BOOT_INFO: AtomicPtr<BootInfo> = AtomicPtr::new(core::ptr::null_mut());
+
+/// The boot handoff `_start` assembled.
+///
+/// # Panics
+/// If called before `_start` has recorded it.
+#[must_use]
+pub fn info() -> &'static BootInfo {
+    let p = BOOT_INFO.load(Ordering::Acquire);
+    assert!(
+        !p.is_null(),
+        "boot: BootInfo used before _start recorded it"
+    );
+    // SAFETY: `p` points at `_start`'s `boot_info` local. `_start` never
+    // returns (it ends in `kmain`, which is `-> !`), so that stack frame lives
+    // as long as the kernel; the bootloader's stack stays mapped (in the HHDM)
+    // and is never reclaimed. The value is not mutated after it is recorded.
+    unsafe { &*p }
+}
+
 /// The base revision of the Limine protocol this kernel is built against. The
 /// bootloader refuses to boot (or reports unsupported) if it cannot satisfy it.
 #[used]
@@ -147,7 +171,8 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    crate::kmain(&boot_info)
+    BOOT_INFO.store(&raw mut boot_info, Ordering::Release);
+    crate::kmain(info())
 }
 
 // Section boundary symbols defined by `kernel/arch/x86_64/linker.ld`. Each is
