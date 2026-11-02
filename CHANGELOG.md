@@ -157,6 +157,17 @@ All notable changes are documented here. The format follows
   and fault on first use, depending on how the build was partitioned. It now
   uses `.pushsection`/`.popsection`.
 
+### Fixed
+
+- LAPIC timer calibration accepted a missing PIT (#109). With no 8254 (for
+  example `-M q35,pit=off`), port `0x61` reads OUT2 high at once, the
+  calibration window ended immediately, and the timer was programmed about
+  500x too fast while the log still said 100 Hz. Calibration now requires
+  OUT2 to read low once the one-shot is programmed, bounds its wait, and
+  rejects any result outside 625 to 625,000 ticks/ms; on failure the kernel
+  warns and keeps cooperative scheduling. A new CI boot mode, `uefi-nopit`,
+  checks this.
+
 ## [0.3.0] - 2026-10-28
 
 M3: the capability model - the microkernel's security core. Unforgeable

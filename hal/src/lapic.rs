@@ -52,6 +52,13 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 /// Calibration window, in microseconds, measured with the PIT.
 const CALIBRATION_US: u32 = 10_000;
 
+/// Plausible APIC timer ticks per millisecond at divide-by-16: a timer clock
+/// from 10 MHz to 10 GHz. Real parts run it from a 19.2 to 100 MHz crystal or
+/// bus clock, and QEMU at 1 GHz; a reading outside this range means the PIT
+/// window was not real (#109).
+const MIN_TICKS_PER_MS: u32 = 625; // 10 MHz / 16 / 1000
+const MAX_TICKS_PER_MS: u32 = 625_000; // 10 GHz / 16 / 1000
+
 /// Virtual base of the mapped register page; 0 until [`init`] succeeds.
 static BASE: AtomicU64 = AtomicU64::new(0);
 
@@ -68,7 +75,8 @@ pub enum LapicError {
     NotInitialized,
     /// Timer frequency of 0 Hz requested, or too high for the measured clock.
     BadFrequency,
-    /// The APIC timer did not count during calibration.
+    /// No usable PIT window, or the APIC timer measured outside the
+    /// plausible range during calibration.
     CalibrationFailed,
 }
 
@@ -161,21 +169,27 @@ pub fn eoi() {
 }
 
 /// Measure APIC timer ticks (at divide-by-16) per millisecond: run the timer
-/// one-shot from its maximum count, masked, across a PIT-timed window.
+/// one-shot from its maximum count, masked, across a PIT-timed window. Fails
+/// if the PIT does not start a real window or the result is implausible, so a
+/// missing PIT can never program a timer hundreds of times too fast (#109).
 fn calibrate() -> Result<u32, LapicError> {
+    const WINDOW_MS: u32 = CALIBRATION_US / 1000;
     write(REG_TIMER_DIVIDE, TIMER_DIVIDE_BY_16);
     write(REG_LVT_TIMER, LVT_MASKED); // one-shot, no interrupt
-    crate::pit::start_oneshot(CALIBRATION_US);
+    if !crate::pit::start_oneshot(CALIBRATION_US) {
+        return Err(LapicError::CalibrationFailed);
+    }
     write(REG_TIMER_INITIAL, u32::MAX);
-    // The APIC count itself bounds the wait: if the PIT never fires, we stop
-    // when the APIC timer runs out rather than spinning forever.
-    while !crate::pit::oneshot_expired() && read(REG_TIMER_CURRENT) != 0 {
+    // Bound the wait by the APIC count: past twice the fastest plausible
+    // window, the PIT is not going to fire.
+    let limit = MAX_TICKS_PER_MS * WINDOW_MS * 2;
+    let elapsed = || u32::MAX - read(REG_TIMER_CURRENT);
+    while !crate::pit::oneshot_expired() && elapsed() < limit {
         core::hint::spin_loop();
     }
-    let elapsed = u32::MAX - read(REG_TIMER_CURRENT);
+    let per_ms = elapsed() / WINDOW_MS;
     write(REG_TIMER_INITIAL, 0); // stop
-    let per_ms = elapsed / (CALIBRATION_US / 1000);
-    if per_ms == 0 || !crate::pit::oneshot_expired() {
+    if !crate::pit::oneshot_expired() || !(MIN_TICKS_PER_MS..=MAX_TICKS_PER_MS).contains(&per_ms) {
         return Err(LapicError::CalibrationFailed);
     }
     Ok(per_ms)

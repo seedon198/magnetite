@@ -71,7 +71,13 @@ Bring-up (`init_preemption` in `kmain`, after the ring-3 demo):
 3. `hal::lapic::start_periodic(0x30, 100)` - **calibrate** the APIC timer
    against PIT channel 2 (a 10 ms one-shot, polled through port `0x61`, so no
    IRQ and no PIC is involved), then program it periodic at divide-by-16 with
-   `initial count = ticks/ms × 10`.
+   `initial count = ticks/ms × 10`. Calibration fails, and the kernel stays
+   on cooperative scheduling with a warning, if channel 2's output is not low
+   once the one-shot is programmed (no working PIT), if the window never
+   ends, or if the result is outside 625 to 625,000 ticks/ms (a 10 MHz to
+   10 GHz timer clock). A missing PIT can therefore never program a timer
+   hundreds of times too fast (#109); CI boots once with `-M q35,pit=off` to
+   check it.
 4. `sti` on the boot thread. Fresh threads start with interrupts enabled (the
    `hal::context` `thread_start` trampoline).
 
