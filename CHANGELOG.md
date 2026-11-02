@@ -238,6 +238,11 @@ All notable changes are documented here. The format follows
   - `sys::invoke` refuses more than four argument words with
     `InvalidSyscall` instead of silently dropping the rest; the root task
     checks it.
+- Console server (#128, #129): every control character a task sends is
+  escaped in the log (C0 and DEL as `\xNN`, C1 as `\u{NN}`), so a `\r` or an
+  ANSI escape can no longer overwrite the `console[N]:` prefix and forge a
+  kernel line; and line buffers track ownership with an `in_use` flag rather
+  than treating badge 0 as free. A boot self-check covers both.
 
 ## [0.3.0] - 2026-10-28
 
