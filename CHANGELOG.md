@@ -281,6 +281,20 @@ All notable changes are documented here. The format follows
   drain the frame allocator first. The per-page copy plan moves into `elf`
   as `Segment::load_plan`, host-tested with segments that start mid-page,
   straddle a page, and mix file bytes with bss; `map_image` follows it.
+- Debug output (#116, #117, #125):
+  - The logger formats records into a pending ring under a short
+    interrupts-off lock and drains it to the UART and framebuffer with
+    interrupts on; one caller drains at a time, and anyone logging meanwhile,
+    an interrupt handler included, only queues. The framebuffer console sits
+    behind a new `hal::sync::TryLock`, so a scroll no longer masks interrupts,
+    and `write_byte` drops a byte after a bounded wait instead of hanging on a
+    wedged UART.
+  - Crash reporters reuse COM1 as configured (`SerialPort::com1_configured`)
+    instead of re-initializing it and discarding the bytes still in its FIFO.
+    This also makes the nested-crash message from #111 actually print.
+  - The page-fault classifier names the whole heap window, so later growth is
+    named too, and a new classifier hook names each thread's kernel-stack
+    guard and stack.
 
 ## [0.3.0] - 2026-10-28
 

@@ -202,7 +202,7 @@ fn default_exception(frame: &mut TrapFrame) {
     // A fault inside the report itself would report again, and again, until
     // the stack overflows into #DF: halt at once instead (#111).
     if frame.vector != 3 && REPORTING.swap(true, Ordering::Relaxed) {
-        let mut com1 = SerialPort::com1();
+        let mut com1 = SerialPort::com1_configured();
         let _ = writeln!(
             com1,
             "\n*** nested {} at {:#x} while reporting a crash - halting ***",
@@ -212,10 +212,10 @@ fn default_exception(frame: &mut TrapFrame) {
         crate::cpu::halt_loop();
     }
 
-    // Use a fresh serial port (like the panic handler) rather than the kernel
-    // logger, so a fault while the log lock is held still reports.
-    let mut com1 = SerialPort::com1();
-    com1.init();
+    // Write COM1 directly (like the panic handler) rather than through the
+    // kernel logger, so a fault while a log lock is held still reports; and
+    // as configured, not re-initialized, so bytes in its FIFO survive (#117).
+    let mut com1 = SerialPort::com1_configured();
 
     let _ = writeln!(com1);
     let _ = writeln!(

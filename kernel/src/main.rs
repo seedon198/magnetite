@@ -657,7 +657,9 @@ fn init_fault_diagnostics(boot_info: &BootInfo) {
         boot_info.hhdm_offset,
         boot_info.hhdm_offset + boot_info.highest_address(),
     );
-    register_region("kernel heap", HEAP_BASE, HEAP_NEXT.load(Ordering::Relaxed));
+    // The whole window, not the heap's size today: it keeps growing (#125).
+    register_region("kernel heap", HEAP_BASE, HEAP_LIMIT);
+    hal::fault::register_classifier(thread::classify_stack);
     for g in hal::gdt::guard_pages() {
         register_region("stack guard", g, g + hal::paging::PAGE);
     }
@@ -689,6 +691,25 @@ fn init_fault_diagnostics(boot_info: &BootInfo) {
             classify(addr).unwrap_or("unmapped/unknown")
         );
     }
+    // The heap is named over its whole window, including memory it grows into
+    // later, and a hit on a thread's kernel-stack guard is named as one (#125).
+    let grown = HEAP_LIMIT - hal::paging::PAGE;
+    assert_eq!(
+        classify(grown),
+        Some("kernel heap"),
+        "pf: later heap growth unnamed"
+    );
+    let (guard_va, stack_va) = thread::kernel_stack_probe(5);
+    assert_eq!(
+        classify(guard_va),
+        Some("kernel stack guard"),
+        "pf: a kernel-stack guard hit is unnamed"
+    );
+    assert_eq!(
+        classify(stack_va),
+        Some("kernel stack"),
+        "pf: a kernel stack is unnamed"
+    );
 }
 
 /// Demonstrate Untyped retype (#55): take one frame as a small Untyped region,
@@ -1183,10 +1204,10 @@ fn panic(info: &PanicInfo) -> ! {
         hal::cpu::halt_loop();
     }
 
-    // Report over a fresh serial port (not the logger), so a panic while the log
-    // lock is held still reports.
-    let mut com1 = SerialPort::com1();
-    com1.init();
+    // Report over COM1 directly (not the logger), so a panic while a log lock
+    // is held still reports; as configured, not re-initialized, so the bytes
+    // of the line before the panic still in its FIFO are kept (#117).
+    let mut com1 = SerialPort::com1_configured();
     let _ = writeln!(com1, "\n*** KERNEL PANIC ***");
     let _ = writeln!(com1, "  {info}");
     hal::backtrace::print(&mut com1);
