@@ -18,7 +18,7 @@
 
 use core::arch::{asm, global_asm};
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::cell::Racy;
 use crate::gdt::KERNEL_CODE;
@@ -185,6 +185,10 @@ fn read_cr2() -> u64 {
     value
 }
 
+/// Set once an unrecoverable exception is being reported. Never cleared: the
+/// report ends in a halt.
+static REPORTING: AtomicBool = AtomicBool::new(false);
+
 /// Fallback handler for vectors with no registered handler: print a diagnostic
 /// report over serial. A breakpoint (#BP) is a trap and resumes; any other CPU
 /// exception is treated as unrecoverable and halts.
@@ -193,6 +197,19 @@ fn default_exception(frame: &mut TrapFrame) {
     // silently, instead of reporting and halting (see `crate::fault`).
     if crate::fault::try_recover(frame) {
         return;
+    }
+
+    // A fault inside the report itself would report again, and again, until
+    // the stack overflows into #DF: halt at once instead (#111).
+    if frame.vector != 3 && REPORTING.swap(true, Ordering::Relaxed) {
+        let mut com1 = SerialPort::com1();
+        let _ = writeln!(
+            com1,
+            "\n*** nested {} at {:#x} while reporting a crash - halting ***",
+            exception_name(frame.vector),
+            frame.rip
+        );
+        crate::cpu::halt_loop();
     }
 
     // Use a fresh serial port (like the panic handler) rather than the kernel
@@ -259,7 +276,10 @@ fn default_exception(frame: &mut TrapFrame) {
         return;
     }
 
-    crate::backtrace::print_from(&mut com1, frame.rbp);
+    // A ring-3 frame's rbp is the user's; there is no kernel chain to walk.
+    if frame.cs & 3 == 0 {
+        crate::backtrace::print_from(&mut com1, frame.rbp);
+    }
     let _ = writeln!(com1, "  unrecoverable exception - halting");
     crate::cpu::halt_loop();
 }
@@ -381,10 +401,12 @@ common_stub:
     push r14
     push r15
     mov rdi, rsp          // &mut TrapFrame
-    mov rbp, rsp          // save unaligned rsp
+    mov rbx, rsp          // save unaligned rsp (callee-saved across the call)
     and rsp, -16          // 16-byte align for the SysV call
+    xor ebp, ebp          // end the frame chain here; the interrupted rbp may
+                          // be a user's (#111)
     call idt_dispatch
-    mov rsp, rbp          // restore
+    mov rsp, rbx          // restore
     pop r15
     pop r14
     pop r13

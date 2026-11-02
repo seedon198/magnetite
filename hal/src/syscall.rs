@@ -203,7 +203,9 @@ extern "C" {
 // throughout (FMASK). ABI: rax=number, rdi=cap, rsi=msg_info, rdx/r8/r9/r10 =
 // mr0..3, r12 = receive slot, r13 = slot to send; rax = status out, and rdi,
 // rsi, rdx, r8 to r10 are reloaded from SyscallArgs (the handler's outputs).
-// Twelve words are pushed, keeping rsp 16-byte aligned for the call.
+// The user's rbp is saved and rbp zeroed before the call, so the kernel's frame
+// chain ends here and never follows a user-chosen pointer (#111). Fourteen
+// words are pushed (one is padding), keeping rsp 16-byte aligned for the call.
 //
 // syscall_compat_entry (CSTAR target) is unreachable while the GDT has no
 // 32-bit user code segment, and kept closed in case one appears. It trusts no
@@ -220,6 +222,8 @@ global_asm!(
     "    mov [rip + SYSCALL_USER_RSP], rsp",
     "    mov rsp, [rip + SYSCALL_KSTACK_TOP]",
     "    push qword ptr [rip + SYSCALL_USER_RSP]", // user RSP, kept on this stack
+    "    push rbp",                                // user RBP
+    "    push 0",                                  // padding, for alignment
     "    push rcx",                                // user RIP
     "    push r11",                                // user RFLAGS
     "    push r13",                                // send slot
@@ -232,10 +236,12 @@ global_asm!(
     "    push rdi",                                // cap
     "    push rax",                                // number  -> rsp = &SyscallArgs
     "    mov rdi, rsp",
+    "    xor ebp, ebp", // end the kernel's frame chain here
     "    call syscall_dispatch",
     // Reload the argument registers from SyscallArgs, so whatever the Rust
-    // handler left in caller-saved registers never reaches ring 3. (rbx, rbp
-    // and r12 to r15 are callee-saved: the call preserved the user's values.)
+    // handler left in caller-saved registers never reaches ring 3. (rbx and
+    // r12 to r15 are callee-saved: the call preserved the user's values; rbp
+    // is restored from the stack.)
     "    mov rdi, [rsp + 8]",
     "    mov rsi, [rsp + 16]",
     "    mov rdx, [rsp + 24]",
@@ -245,7 +251,9 @@ global_asm!(
     "    add rsp, 72", // pop the nine SyscallArgs words (rax holds status)
     "    pop r11",
     "    pop rcx",
-    "    pop rsp", // user RSP
+    "    add rsp, 8", // padding
+    "    pop rbp",    // user RBP
+    "    pop rsp",    // user RSP
     "    sysretq",
     //
     ".global syscall_compat_entry",
