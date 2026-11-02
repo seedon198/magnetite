@@ -92,14 +92,15 @@ jobs:
         run: cargo audit
 
   # Boot the ISO headless in QEMU and assert the kernel prints its marker over
-  # serial. Covers both firmware paths (BIOS boot is reliable on Linux runners).
+  # serial. Covers both firmware paths (BIOS boot is reliable on Linux runners),
+  # and UEFI with no PIT, where timer calibration must fall back (#109).
   boot-test:
     name: Boot test (${{ matrix.mode }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        mode: [bios, uefi]
+        mode: [bios, uefi, uefi-nopit]
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain

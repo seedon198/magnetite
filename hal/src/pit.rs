@@ -27,7 +27,14 @@ const CH2_MODE0: u8 = 0b1011_0000;
 /// Start a one-shot countdown of `micros` microseconds (at most ~54 ms, the
 /// 16-bit counter's range) on channel 2. Poll [`oneshot_expired`] to wait for
 /// it.
-pub(crate) fn start_oneshot(micros: u32) {
+///
+/// Returns `false` if channel 2's output did not go low once programmed: in
+/// mode 0 it drops when the mode is written and rises only at terminal count,
+/// so an output already high means no working PIT (absent, gated, or port 0x61
+/// floating high), and [`oneshot_expired`] would report a window that never
+/// ran (#109).
+#[must_use]
+pub(crate) fn start_oneshot(micros: u32) -> bool {
     // Deliberate truncation: clamp to the 16-bit counter range.
     let count = (PIT_HZ * u64::from(micros) / 1_000_000).clamp(1, 0xffff) as u16;
     let [lo, hi] = count.to_le_bytes();
@@ -43,6 +50,7 @@ pub(crate) fn start_oneshot(micros: u32) {
         outb(CH2_DATA, lo);
         outb(CH2_DATA, hi); // counting starts on the next PIT clock
     }
+    !oneshot_expired()
 }
 
 /// Whether the countdown started by [`start_oneshot`] has reached zero.

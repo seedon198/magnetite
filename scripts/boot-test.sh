@@ -11,7 +11,11 @@
 # We poll the serial log and stop as soon as either appears (no fixed long
 # wait). Pure serial-grep: no special kernel instrumentation is needed.
 #
-# Usage: scripts/boot-test.sh <bios|uefi>
+# `uefi-nopit` boots UEFI on a machine with no 8254 PIT. LAPIC timer
+# calibration must notice and fall back to cooperative scheduling (#109), so
+# that mode also requires the warning and a cooperative `ready:` line.
+#
+# Usage: scripts/boot-test.sh <bios|uefi|uefi-nopit>
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -31,13 +35,22 @@ if [[ ! -f "$ISO" ]]; then
     exit 1
 fi
 
-qemu_args=(-M q35 -cpu qemu64,+smep,+smap -m 256M -cdrom "$ISO" -serial "file:$LOG" -display none -no-reboot)
+MACHINE=q35
+if [[ "$MODE" == uefi-nopit ]]; then
+    MACHINE=q35,pit=off
+    MARKERS+=(
+        '^\[WARN\] lapic: timer start failed: CalibrationFailed'
+        '^\[INFO\] ready: .*cooperative scheduling'
+    )
+fi
+
+qemu_args=(-M "$MACHINE" -cpu qemu64,+smep,+smap -m 256M -cdrom "$ISO" -serial "file:$LOG" -display none -no-reboot)
 
 case "$MODE" in
     bios)
         qemu_args+=(-boot d)
         ;;
-    uefi)
+    uefi | uefi-nopit)
         ovmf=""
         for cand in \
             /usr/share/OVMF/OVMF_CODE_4M.fd \
@@ -60,7 +73,7 @@ case "$MODE" in
         qemu_args+=(-drive "if=pflash,unit=0,format=raw,file=${ovmf},readonly=on")
         ;;
     *)
-        echo "usage: boot-test.sh <bios|uefi>" >&2
+        echo "usage: boot-test.sh <bios|uefi|uefi-nopit>" >&2
         exit 2
         ;;
 esac
