@@ -149,8 +149,8 @@ All notable changes are documented here. The format follows
   least). Slot `0x18` is now null (`sysretq` never reads it), `CSTAR` points at
   a stub that switches to the thread's kernel stack and kills it, and the
   `SYSENTER` MSRs are zeroed so `sysenter` faults in ring 3. The user-mode demo
-  gains two tasks that try each path and must die by `#GP` and by `#GP` or
-  `#UD`.
+  gains two tasks that try each path and must die by a fault in ring 3: at
+  the far return itself, and at `sysenter`.
 - The IDT's `global_asm!` switched to `.rodata` for its stub table and never
   switched back, so asm the compiler placed after it in the same codegen unit
   (the syscall and ring-3 entry stubs) could land in non-executable `.rodata`

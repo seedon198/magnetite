@@ -33,8 +33,10 @@ static MR0: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX
 static RSP_OFFSET: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
 /// Values user threads reported with `report`, OR-ed together per thread.
 static REPORT: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
-/// The exception vector that killed each user thread, plus one (0 = none).
+/// The exception vector that killed each user thread, plus one (0 = none),
+/// and the user `rip` it was raised at.
 static KILLED_BY: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
+static KILLED_AT: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
 
 /// The demo's threads, one bit each: only they may use the debug syscalls.
 static DEBUG_THREADS: AtomicU64 = AtomicU64::new(0);
@@ -130,6 +132,7 @@ pub fn debug_syscall(t: ThreadId, args: &SyscallArgs) -> Option<u64> {
 pub fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
     let t = SCHED.lock().current().expect("user: a running thread");
     KILLED_BY[t.0].store(frame.vector + 1, Ordering::Relaxed);
+    KILLED_AT[t.0].store(frame.rip, Ordering::Relaxed);
     crate::info!(
         "user: thread {} killed: {} at {:#x}, rip={:#x}",
         t.0,
@@ -170,7 +173,8 @@ fn free_frames() -> usize {
 ///   where a later `iretq` would fault in ring 0;
 /// - thread 15 far-returns to selector `0x1b` to reach compatibility mode and
 ///   `syscall` from there, which would enter ring 0 at `IA32_CSTAR` on its own
-///   stack (#102): it must be killed by `#GP` at the far return;
+///   stack (#102): it must be killed by a ring-3 fault at the far return
+///   (`#GP` on hardware; QEMU 8 raises `#PF` reading the user stack first);
 /// - thread 16 executes `sysenter`, which must fault in ring 3 too.
 pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     // Assembled with `llvm-mc -triple=x86_64 -filetype=obj` and
@@ -209,7 +213,7 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
     ];
     // push 0x1b; lea rax, [rip + 1f]; push rax; retfq; 1: syscall; 2: jmp 2b.
-    // Assembled as YIELD_REPORT.
+    // The retfq is at offset 10. Assembled as YIELD_REPORT.
     const COMPAT_SYSCALL: [u8; 16] = [
         0x6a, 0x1b, 0x48, 0x8d, 0x05, 0x03, 0x00, 0x00, 0x00, 0x50, 0x48, 0xcb, 0x0f, 0x05, 0xeb,
         0xfe,
@@ -259,9 +263,11 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         Some(14),
         "user: a kernel read was not a page fault"
     );
-    assert_eq!(
-        killed_by(15),
-        Some(13),
+    // Killed by a fault at the far return, so it never ran in compatibility
+    // mode: a `syscall` from there would end it through `compat_syscall`,
+    // which records no vector.
+    assert!(
+        killed_by(15).is_some() && KILLED_AT[15].load(Ordering::Relaxed) == USER_CODE_VA + 10,
         "user: a far return to a 32-bit code segment did not fault"
     );
     assert!(
