@@ -21,7 +21,7 @@ Two themes run through every milestone:
 
 - **Hardening** - the privileged core stays tiny and memory-safe; every
   addition is justified against the [threat model](architecture/threat-model.md).
-- **Offense enablement** - the system is steadily shaped toward running native
+- **Offense enablement** - the kernel is steadily shaped toward running native
   security tooling.
 
 ---
@@ -118,7 +118,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 - [ ] Embedded scripting runtime in a user-space service
 - [ ] Capability-mediated API surface exposed to scripts (raw sockets, etc.)
 - [ ] First native tools: port scanner, packet sniffer, a basic fuzzer harness
-- [ ] Tooling that is auditable and runs without recompiling the OS
+- [ ] Tooling that is auditable and runs without recompiling the kernel
 
 ## Beyond
 

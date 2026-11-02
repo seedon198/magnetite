@@ -60,7 +60,7 @@ visible and auditable. Details in [security-model.md](security-model.md) and
 Security *tooling* is a first-class workload. The kernel exposes low-level
 primitives (raw packet TX/RX, promiscuous mode) as capabilities, and a
 user-space **scripting runtime** lets you write and run tools - scanners,
-sniffers, fuzzers - without rebuilding the OS. The runtime itself holds only
+sniffers, fuzzers - without rebuilding the kernel. The runtime itself holds only
 the capabilities it is granted, so "offense" is contained like any other
 server. See [ADR 0008](../adr/0008-native-tooling.md).
 

@@ -7,8 +7,8 @@
 
 The kernel structure determines the size of the **Trusted Computing Base** -
 the code that must be correct for the system to be secure. For a
-security-focused OS this is the central architectural decision. The system also
-has an offensive role (drivers and a network stack handling hostile input),
+security-focused kernel this is the central architectural decision. The kernel
+also hosts offensive work (drivers and a network stack handling hostile input),
 which makes isolation of those components especially valuable.
 
 ## Options considered

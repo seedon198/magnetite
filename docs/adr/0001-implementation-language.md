@@ -5,8 +5,8 @@
 
 ## Context
 
-This is a **security-focused** OS whose main selling point is a hardened
-kernel. The single largest source of kernel vulnerabilities across the
+Magnetite is a **security-focused** kernel, and being hardened is its main
+selling point. The single largest source of kernel vulnerabilities across the
 industry is memory-unsafety: use-after-free, buffer overflows, type confusion.
 The language choice is therefore a security decision, not just an ergonomics
 one. The target is bare-metal x86-64; development is on Apple Silicon macOS.

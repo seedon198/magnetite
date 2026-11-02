@@ -2,7 +2,7 @@
 
 > Status: **living document.** Revised as the system grows.
 
-This OS is both a *hardened* system and a *platform for offensive security
+Magnetite is both a *hardened* kernel and a *base for offensive security
 work*. Those two roles have different threat models; this page keeps them
 straight, and sets the ethical boundary.
 
@@ -13,7 +13,7 @@ testing systems you own or have written permission to test, CTFs, lab work,
 and learning OS/security internals. It is **not** for unauthorized access to
 systems or data. See [SECURITY.md](../../SECURITY.md).
 
-## Part 1 - Threats *to* the OS (what we harden against)
+## Part 1 - Threats *to* the kernel (what we harden against)
 
 The memory-level mitigations below (W^X, NX, SMEP/SMAP, KASLR, guard pages, zeroed
 frames, per-address-space isolation) are **implemented as of milestone M2** - see
@@ -42,9 +42,9 @@ kernel; others are design commitments realized in later milestones.
 - **Hostile:** all external input (network, storage, USB) and anything a
   native tool interacts with on a target.
 
-## Part 2 - The OS *as* a security tool (what it is allowed to do)
+## Part 2 - The kernel *as* a base for security tools (what it is allowed to do)
 
-The system intentionally provides capabilities that are "offensive":
+The kernel intentionally provides capabilities that are "offensive":
 
 - raw packet transmit/receive and promiscuous capture,
 - port/host scanning primitives,

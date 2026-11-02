@@ -30,7 +30,7 @@ the orchestration.
 
 ## Consequences
 
-- One toolchain (Rust) for both the OS and its build logic; nothing extra to
+- One toolchain (Rust) for both the kernel and its build logic; nothing extra to
   install beyond `qemu` and `xorriso`.
 - Cross-platform without shell-script portability traps.
 - Slightly more verbose than a `Makefile` for trivial tasks, and `xtask` is a
