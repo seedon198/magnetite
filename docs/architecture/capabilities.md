@@ -1,9 +1,10 @@
 # Capabilities
 
-> Status: **the model is implemented in milestone M3.** The capability data
-> model, Untyped/retype, the object types, and the invocation API are in the
-> kernel; **blocking IPC and the ring-3 `syscall` entry are M4** (they need
-> threads). See the [security model](security-model.md) for the *why* and
+> Status: **the model is implemented in milestone M3**, and M4 added
+> blocking IPC and the ring-3 `syscall` entry. The capability data model,
+> Untyped/retype, the object types, the invocation API, IPC and user tasks are
+> in the kernel; Notification wait, Untyped splitting, revoke and user-made
+> `Thread`/`AddressSpace` objects are M5 work (#162, #156). See the [security model](security-model.md) for the *why* and
 > [ADR 0006](../adr/0006-security-model.md) / [ADR 0016](../adr/0016-capability-implementation.md)
 > for the decisions.
 
@@ -74,9 +75,9 @@ budget and cannot exhaust kernel memory.
 | `CNode` | a capability-space node | `Slot` array | backs the cap space |
 | `Frame` | a physical page | one page | create + identify |
 | `Endpoint` | a synchronous IPC rendezvous | its blocked-thread queue | IPC works between kernel threads (#81); user mode in #82 |
-| `Notification` | an async signal | signal word + waiters | signal works; wait is M4 |
-| `AddressSpace` | a page-table root | a PML4 | object only; user mapping is M4 |
-| `Thread` | a schedulable context | - | M4 |
+| `Notification` | an async signal | signal word + waiters | signal works, also from ring 3; wait is M5 (#162) |
+| `AddressSpace` | a page-table root | a PML4 | built by the kernel's task loader (#82); a capability to create and map one is M5 (#162) |
+| `Thread` | a schedulable context | - | kernel-internal; a capability to create one is M5 (#162) |
 
 Each kind's storage `(size, align)` comes from `ObjectKind::fixed_layout` (or
 `cnode_bytes` for a CNode).
@@ -100,22 +101,27 @@ its required rights), then performs the effect. Methods implemented in M3:
 - `NotificationSignal` - OR bits into a notification's signal word.
 
 `Method::authorize` and the `Method`/error types are pure and host-tested; the
-kernel dispatcher adds the memory effects. M4's ring-3 `syscall` entry decodes
-raw register arguments into a `Method` and calls this same path.
+kernel dispatcher adds the memory effects. The ring-3 `syscall` entry (#82)
+decodes raw register arguments into a `Method` and calls this same path.
 
-## What's deferred to M4
+## What M4 added, and what moves to M5
 
-These need threads / userspace:
+Done in M4:
 
-- **Blocking synchronous IPC** - done for kernel threads (#81,
-  [ADR 0018](../adr/0018-synchronous-ipc.md)): Send, Recv, Call, Reply and
-  ReplyRecv, badges, and one-capability transfer under `GRANT`. The engine is
-  the pure, host-tested `ipc` crate; user threads reach it through the
-  `syscall` boundary in #82.
-- **The `syscall` boundary** - the ring-3 entry that invokes capabilities.
-- **`Thread`** objects, and user `AddressSpace` mapping.
-- **Untyped splitting** (retyping Untyped → child Untyped) and whole-region
-  **revoke**.
+- **Blocking synchronous IPC** (#81, [ADR 0018](../adr/0018-synchronous-ipc.md)):
+  Send, Recv, Call, Reply and ReplyRecv, badges, and one-capability transfer
+  under `GRANT`. The engine is the pure, host-tested `ipc` crate.
+- **The `syscall` boundary** (#82, [ADR 0019](../adr/0019-first-user-task.md)):
+  ring-3 tasks invoke capabilities and use IPC; the root task runs confined to
+  the capabilities it was given.
+
+Moved to M5, tracked:
+
+- **Notification wait**, **Untyped splitting**, and user-created **`Thread`**
+  and **`AddressSpace`** objects (#162).
+- **Revoke**: a capability derivation tree
+  ([ADR 0020](../adr/0020-capability-derivation-and-revoke.md), #156), which
+  must land before any `GRANT` path between tasks.
 
 ## Layering & testing
 

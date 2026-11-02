@@ -93,7 +93,8 @@ pub struct EndpointState {
 pub struct NotificationState {
     /// Accumulated signal word (set bits are pending signals).
     pub signal: u64,
-    /// Head of the waiter queue (0 = none); populated with M4.
+    /// Head of the waiter queue (0 = none). Unused until Notification wait
+    /// lands (M5, #162).
     pub waiters: u64,
 }
 

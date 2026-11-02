@@ -94,6 +94,8 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 **Status: planned.**
 
+- [ ] Capability revoke: the derivation tree of [ADR 0020](adr/0020-capability-derivation-and-revoke.md) (#156), before any `GRANT` path between tasks
+- [ ] Notification wait, Untyped splitting, user-created `Thread` and `AddressSpace` objects (#162)
 - [ ] Server runtime library (`libs/`): receive-loop, capability plumbing
 - [ ] Device manager server; bus enumeration (PCI/PCIe via ECAM)
 - [ ] Driver-as-server model proven end to end (e.g. serial or a timer server)

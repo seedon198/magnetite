@@ -47,9 +47,13 @@ start a line with `- ` mid-sentence: that turns it into a list item.
 
 ## The `unsafe` rule
 
-`unsafe` is **forbidden** outside the `hal` crate ([ADR 0007](docs/adr/0007-unsafe-policy.md)).
-A PR that adds `unsafe` elsewhere, or weakens `#![forbid(unsafe_code)]`, will
-not be merged. In `hal`, every `unsafe` block needs a `// SAFETY:` comment.
+`unsafe` is allowed in exactly three places ([ADR 0007](docs/adr/0007-unsafe-policy.md)):
+the `hal` crate, the kernel's `kernel/src/boot/` (linker and bootloader glue),
+and `libs/sys/src/arch.rs` (the ring-3 syscall stubs). The kernel crate is
+`#![deny(unsafe_code)]`; pure crates and user programs are
+`#![forbid(unsafe_code)]`. A PR that adds `unsafe` elsewhere, or weakens either
+lint, will not be merged. Every `unsafe` block needs a `// SAFETY:` comment.
+CI enforces this with `scripts/check-unsafe.sh`.
 
 ## Workflow
 
@@ -61,7 +65,9 @@ not be merged. In `hal`, every `unsafe` block needs a `// SAFETY:` comment.
 3. Make sure these pass locally:
    - `cargo xtask build`
    - `cargo fmt --check`
-   - `cargo clippy --all-targets -- -D warnings`
+   - `cargo clippy --all-targets -- -D warnings` (host crates)
+   - `cargo clippy -p kernel -p hal -p boot-info -p sys -p user-root -p user-fault --target x86_64-unknown-none -- -D warnings`
+     (the bare-metal crates, which host clippy skips)
    - `cargo xtask test`
    - the kernel boots: `cargo xtask run`
    - `scripts/check-unsafe.sh`, `scripts/check-dashes.sh` and

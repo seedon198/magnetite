@@ -221,7 +221,6 @@ pub fn kernel_sections() -> KernelSections {
     }
 }
 
-/// Translate a Limine memory-map entry type into our architecture-neutral kind.
 /// The bytes of boot module `m`.
 pub fn module_bytes(m: &Module) -> &'static [u8] {
     // SAFETY: Limine loaded the module at `m.address` (an HHDM address) with
@@ -232,6 +231,7 @@ pub fn module_bytes(m: &Module) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(m.address as *const u8, m.size as usize) }
 }
 
+/// Translate a Limine memory-map entry type into our architecture-neutral kind.
 fn region_kind(entry_type: EntryType) -> RegionKind {
     match entry_type {
         EntryType::USABLE => RegionKind::Usable,
