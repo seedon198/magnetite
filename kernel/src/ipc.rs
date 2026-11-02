@@ -227,6 +227,13 @@ fn invoke(
                 assert!(sched.admit(t), "ipc: woken thread already runnable");
             }
             if outcome.caller == Effect::Block {
+                // The boot thread is the idle thread: it never blocks, so the
+                // run queue is never empty (#107, ADR 0018).
+                assert_ne!(
+                    me,
+                    ThreadId(0),
+                    "ipc: the boot (idle) thread must never block"
+                );
                 sched.remove(me);
                 let next = sched.current();
                 Some(next.expect("ipc: every thread blocked (the boot thread never blocks on IPC)"))

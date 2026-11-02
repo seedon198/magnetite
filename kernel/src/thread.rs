@@ -51,6 +51,35 @@ pub fn mark_exited(t: ThreadId) {
     EXITED.fetch_or(1 << t.0, Ordering::Release);
 }
 
+/// Yields a boot-time wait for a task allows before giving up (#136): far more
+/// than any boot task needs, yet a stalled task fails the boot with its name
+/// in seconds instead of hanging until CI's timeout. Counted in yields, not
+/// timer ticks, since ticks do not advance under cooperative scheduling.
+const EXIT_WAIT_YIELDS: u64 = 2_000_000;
+
+/// Yield until `t` (described as `what`) has exited.
+///
+/// # Panics
+/// If it has not exited after [`EXIT_WAIT_YIELDS`] yields.
+pub fn wait_exit(t: ThreadId, what: &str) {
+    for _ in 0..EXIT_WAIT_YIELDS {
+        if has_exited(t) {
+            return;
+        }
+        crate::yield_now();
+    }
+    let runnable = hal::cpu::without_interrupts(|| SCHED.lock().contains(t));
+    panic!(
+        "thread: {what} (thread {}) did not exit after {EXIT_WAIT_YIELDS} yields ({})",
+        t.0,
+        if runnable {
+            "still runnable"
+        } else {
+            "blocked"
+        }
+    );
+}
+
 /// Whether `t` has exited and not yet been reaped.
 pub fn has_exited(t: ThreadId) -> bool {
     EXITED.load(Ordering::Acquire) & (1 << t.0) != 0
@@ -74,21 +103,39 @@ pub fn init_kernel_root(root: u64) {
 
 /// Map a fresh 16 KiB kernel stack in slot `slot` of the kernel-stack window,
 /// leaving the guard page below it unmapped. Returns the stack top, or `None`
-/// if frames ran out or the slot is taken.
+/// if frames ran out or the slot is taken. On `None` nothing is left
+/// allocated, and a taken slot is never touched (#130), so a caller must not
+/// call [`free_kernel_stack`] for it.
 pub fn alloc_kernel_stack(slot: usize) -> Option<u64> {
     let bottom = KSTACK_BASE + slot as u64 * KSTACK_SLOT + PAGE;
+    let pages = KSTACK_BYTES / PAGE;
     hal::cpu::without_interrupts(|| {
         let mut guard = KERNEL_SPACE.lock();
         let space = guard.as_mut()?;
-        for page in 0..KSTACK_BYTES / PAGE {
-            let frame = hal::frame::alloc_frame()?;
-            space
-                .map(
-                    bottom + page * PAGE,
-                    frame.addr(),
-                    Flags::WRITABLE | Flags::NO_EXECUTE,
-                )
-                .ok()?;
+        if (0..pages).any(|p| space.translate(bottom + p * PAGE).is_some()) {
+            return None;
+        }
+        for page in 0..pages {
+            let va = bottom + page * PAGE;
+            let mapped = hal::frame::alloc_frame().is_some_and(|frame| {
+                let ok = space
+                    .map(va, frame.addr(), Flags::WRITABLE | Flags::NO_EXECUTE)
+                    .is_ok();
+                if !ok {
+                    hal::frame::free_frame(frame);
+                }
+                ok
+            });
+            if !mapped {
+                // Undo the pages this call mapped; the slot was free before.
+                for done in (0..page).map(|p| bottom + p * PAGE) {
+                    if let Some(phys) = space.translate(done) {
+                        space.unmap(done);
+                        hal::frame::free_frame(hal::frame::PhysFrame::containing(phys));
+                    }
+                }
+                return None;
+            }
         }
         Some(bottom + KSTACK_BYTES)
     })

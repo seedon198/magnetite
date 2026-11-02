@@ -73,8 +73,9 @@ pub fn spawn(t: ThreadId, stack_slot: usize, image: &[u8]) -> Result<(), LoadErr
         space.destroy_user();
         return Err(e);
     }
+    // A refused slot leaves nothing allocated, so there is nothing to free
+    // here, and never another thread's stack (#130).
     let Some(kstack) = thread::alloc_kernel_stack(stack_slot) else {
-        thread::free_kernel_stack(stack_slot);
         space.destroy_user();
         return Err(LoadError::OutOfMemory);
     };
@@ -311,9 +312,7 @@ fn fault_demo(fault: &[u8]) {
         crate::warn!("task: fault task not loaded ({e:?}); skipped");
         return;
     }
-    while !thread::has_exited(FAULT) {
-        crate::yield_now();
-    }
+    thread::wait_exit(FAULT, "the fault task");
     thread::reap(FAULT);
     assert_eq!(free_frames(), before, "task: the fault task leaked frames");
     crate::info!("task: fault task contained and reclaimed");
@@ -334,9 +333,7 @@ fn root_demo(console: ObjectRef, root: &[u8]) {
             return;
         }
     };
-    while !thread::has_exited(ROOT) {
-        crate::yield_now();
-    }
+    thread::wait_exit(ROOT, "the root task");
     assert!(
         console::ROOT_PASSED.load(Ordering::Acquire),
         "task: the root task did not report its checks passed"

@@ -272,9 +272,22 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         && spawn_user(ThreadId(17), 10, &RBP_CHAIN, 0, 0);
     assert!(spawned, "user: could not create the demo threads");
 
+    // A kernel-stack slot in use is refused, with nothing allocated and the
+    // owner's stack untouched (#130).
+    let before_refusal = free_frames();
+    assert!(
+        thread::alloc_kernel_stack(1).is_none(),
+        "user: allocated a kernel stack over thread 7's"
+    );
+    assert_eq!(
+        free_frames(),
+        before_refusal,
+        "user: a refused kernel stack leaked frames"
+    );
+
     let demo_threads = || [7, 8, 9, 10, 11, 15, 16, 17].into_iter().map(ThreadId);
-    while !demo_threads().all(thread::has_exited) {
-        crate::yield_now();
+    for t in demo_threads() {
+        thread::wait_exit(t, "a user demo task");
     }
 
     let top = USER_STACK_VA + PAGE;

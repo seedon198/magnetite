@@ -159,8 +159,12 @@ keeps its size; the reserved words become the tail and the tag.
 the ready queue until IPC wakes it. At a rendezvous the thread that was
 waiting becomes ready (at the back of the queue) and the arriving thread
 continues. A direct switch to the partner (seL4's fast path) is a later
-optimization. If every thread is blocked, the CPU idles in `hlt` until the
-timer, as today.
+optimization. There is no separate idle thread: the **boot thread is the
+idle thread**. It never blocks on IPC and never exits, and once boot is done
+it waits in `hlt` with interrupts on, so the run queue is never empty and a
+CPU with nothing else to run idles in it until the next interrupt. Blocking
+asserts this (#107). A dedicated idle thread, kept off the run queue, is a
+later refinement.
 
 **Concurrency.** Every IPC operation runs with interrupts off and takes the
 locks it needs in one fixed order, never switching threads while holding one
