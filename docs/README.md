@@ -12,6 +12,8 @@
 | [Boot process](architecture/boot.md) | From power-on to the root server |
 | [Interrupts & exceptions](architecture/interrupts.md) | IDT, trap frames, dispatch |
 | [Memory layout](architecture/memory-layout.md) | Address-space map and isolation |
+| [Threads & scheduling](architecture/scheduling.md) | Threads, context switch, round-robin, preemption, FPU state |
+| [IPC](architecture/ipc.md) | Endpoints, Call/Reply, badges, capability transfer, the console server |
 | [System calls](architecture/syscalls.md) | The syscall ABI, kernel methods, the root task |
 | **Decisions** | |
 | [ADR index](adr/README.md) | Architecture Decision Records |
