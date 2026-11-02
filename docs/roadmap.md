@@ -13,8 +13,9 @@ the same PR, and a release that closes a milestone marks its status line.
 | M1 Kernel core | done, [v0.1.0](https://github.com/seedon198/magnetite/releases/tag/v0.1.0) |
 | M2 Memory & isolation | done, [v0.2.0](https://github.com/seedon198/magnetite/releases/tag/v0.2.0) |
 | M3 Capabilities | done, [v0.3.0](https://github.com/seedon198/magnetite/releases/tag/v0.3.0) |
-| M4 Scheduling & userspace | in progress |
-| M5 to M7 | planned |
+| M4 Scheduling & userspace | done, [v0.4.0](https://github.com/seedon198/magnetite/releases/tag/v0.4.0) |
+| M5 User servers | next |
+| M6 to M7 | planned |
 
 Two themes run through every milestone:
 
@@ -80,7 +81,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 ## M4: Scheduling & userspace
 
-**Status: in progress** (epic #19).
+**Status: done** ([v0.4.0](https://github.com/seedon198/magnetite/releases/tag/v0.4.0)).
 
 - [x] Threads, context switch, round-robin scheduler (#78)
 - [x] Preemptive scheduling via the LAPIC timer (#80)
@@ -92,7 +93,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 ## M5: User servers
 
-**Status: planned.**
+**Status: next** (epic #20). Revoke (#156) comes first.
 
 - [ ] Capability revoke: the derivation tree of [ADR 0020](adr/0020-capability-derivation-and-revoke.md) (#156), before any `GRANT` path between tasks
 - [ ] Notification wait, Untyped splitting, user-created `Thread` and `AddressSpace` objects (#162)

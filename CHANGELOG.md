@@ -19,6 +19,21 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
+M4: scheduling and userspace. Threads with a context switch, round-robin
+scheduling and LAPIC-timer preemption; ring 3 behind a `syscall` boundary that
+invokes capabilities; blocking synchronous IPC over Endpoints with badges and
+capability transfer; separately built Rust programs loaded from boot modules
+and run confined to the capabilities they are given, printing through a console
+server; per-thread FPU and SSE state. Also the project's rename to Magnetite,
+and the fixes from a whole-codebase review (#102 to #136) and its follow-ups:
+syscall-entry hardening, W^X for the HHDM alias and RELRO, a guarded boot
+stack, HHDM randomization, bootloader-memory reclaim, frame and heap
+hardening, and CI that boots a release kernel and treats any unexpected
+warning as a failure. Capability revoke (ADR 0020) and the user servers are
+M5.
+
 ### Project: renamed to Magnetite
 
 - The project is now **Magnetite** (Fe₃O₄), at
@@ -629,6 +644,7 @@ that reaches the kernel and prints over serial in QEMU.
   runs it for both BIOS and UEFI (BIOS boot is now covered on Linux runners).
   Serial logs are uploaded as artifacts. **M0 complete.**
 
+[0.4.0]: https://github.com/seedon198/magnetite/releases/tag/v0.4.0
 [0.3.0]: https://github.com/seedon198/magnetite/releases/tag/v0.3.0
 [0.2.0]: https://github.com/seedon198/magnetite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/seedon198/magnetite/releases/tag/v0.1.0
