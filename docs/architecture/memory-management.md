@@ -94,8 +94,9 @@ base each boot ([ADR 0015](../adr/0015-kaslr.md)).
   backtrace address can be mapped back to the link base for `llvm-addr2line`.
 - W^X and the rest compose for free: permissions key off relocating linker
   symbols, and the HHDM is always read dynamically from `boot_info.hhdm_offset`.
-- *Known limitation:* HHDM-base randomization is configured but not yet
-  effective with the stable-pinned `limine` 0.5 protocol revision.
+- The HHDM base is randomized as well, in 1 GiB steps (#70). This needs the
+  kernel's paging-mode request: Limine applies `randomise_hhdm_base` only when
+  handling one.
 
 ## 5. SMEP / SMAP - `hal::cpu`
 
@@ -170,7 +171,6 @@ the serial log; the pure crates add host unit tests.
   `alloc_contiguous` covers aligned power-of-two runs).
 - `unmap` frees the intermediate tables it empties (#64), but never the root
   or a kernel-half PDPT (shared by every user space).
-- HHDM-base randomization pending a newer Limine protocol revision.
 - A negative W^X/NX fault test (deliberately faulting) builds on the recoverable
   probe and the #PF handler; the probe primitive exists, broader fault-injection
   testing is future work.

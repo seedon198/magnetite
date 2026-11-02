@@ -19,9 +19,11 @@
 use boot_info::{BootInfo, Firmware, Framebuffer, MemoryRegion, Module, RegionKind, ShortStr};
 use limine::firmware_type::FirmwareType;
 use limine::memory_map::EntryType;
+use limine::paging::Mode;
 use limine::request::{
     BootloaderInfoRequest, ExecutableAddressRequest, FirmwareTypeRequest, FramebufferRequest,
-    HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker,
+    HhdmRequest, MemoryMapRequest, ModuleRequest, PagingModeRequest, RequestsEndMarker,
+    RequestsStartMarker,
 };
 use limine::BaseRevision;
 
@@ -66,6 +68,14 @@ static MEMORY_MAP: MemoryMapRequest = MemoryMapRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static HHDM: HhdmRequest = HhdmRequest::new();
+
+/// 4-level paging, which the kernel's page-table code assumes. The request also
+/// matters for HHDM randomization (#70): Limine reads `randomise_hhdm_base`
+/// only while handling a paging-mode request, so without one the HHDM base
+/// never moves, whatever `limine.conf` says.
+#[used]
+#[unsafe(link_section = ".requests")]
+static PAGING_MODE: PagingModeRequest = PagingModeRequest::new().with_mode(Mode::FOUR_LEVEL);
 
 /// Physical and virtual base of the loaded kernel image, for phys<->virt
 /// translation and the KASLR base (M2).

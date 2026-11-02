@@ -42,12 +42,12 @@ This composes with the rest of M2 at no extra cost: W^X keys off linker symbols
 - Backtrace addresses include the slide; the logged `kaslr: slide=…` line makes
   symbolication a subtraction. (Fully slide-aware in-kernel symbolization would
   need a symbol table; out of scope.)
-- **HHDM randomization is configured but not yet observed to take effect** with
-  the pinned Limine v11 binary and the stable-compatible `limine` 0.5 crate
-  (whose base revision predates HHDM-base randomization). The directive is
-  harmless and correct, and will activate if we move to a newer protocol
-  revision; tracked as a follow-up. Kernel-image KASLR - the primary goal -
-  works regardless.
+- **The HHDM base is randomized too** (#70), in 1 GiB steps over a quarter of
+  the higher half. It first seemed tied to a newer protocol revision, but the
+  cause was elsewhere: Limine reads `randomise_hhdm_base` only while handling a
+  paging-mode request, and the kernel made none. It now requests 4-level
+  paging (`PagingModeRequest`), which it assumes anyway, and the HHDM base
+  changes on every boot under UEFI and BIOS alike.
 - `-z notext` means some relocations sit in `.rodata`; they are applied by
   Limine before handoff and the section is then re-protected read-only, so there
   is no writable-executable window.
