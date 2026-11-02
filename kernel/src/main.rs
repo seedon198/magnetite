@@ -443,6 +443,29 @@ fn harden_memory(boot_info: &BootInfo) {
         pages, huge
     );
 
+    // The HHDM maps the kernel image's frames a second time, read-write. Make
+    // that alias read-only for .text and .rodata (splitting the huge pages
+    // that cover them), so a kernel write primitive cannot patch code or
+    // read-only tables through it and run the result at the normal address
+    // (#119). .data is writable through both mappings either way.
+    let mut aliases = 0usize;
+    for (start, end) in [s.text, s.rodata] {
+        for v in (start..end).step_by(hal::paging::PAGE as usize) {
+            let Some(phys) = aspace.translate(v) else {
+                continue;
+            };
+            let alias = hhdm + (phys & !(hal::paging::PAGE - 1));
+            if aspace.split_huge(alias).is_err() {
+                warn!("harden: out of frames splitting the HHDM at {alias:#x}");
+                continue;
+            }
+            if aspace.make_read_only(alias).is_ok() {
+                aliases += 1;
+            }
+        }
+    }
+    info!("harden: HHDM alias of {aliases} kernel code and read-only pages made read-only");
+
     // Verify the invariants we most care about.
     let mut ok = true;
     if let Some((_, f)) = aspace.query(s.text.0) {
@@ -455,6 +478,22 @@ fn harden_memory(boot_info: &BootInfo) {
         ok &= f.contains(Flags::NO_EXECUTE);
     }
     assert!(ok, "harden: W^X/NX invariants not satisfied");
+    // The HHDM maps the same frames again: no page of .text or .rodata may be
+    // writable through it, or a write there would change code (#119).
+    let aliases_read_only = [s.text, s.rodata].into_iter().all(|(start, end)| {
+        (start..end)
+            .step_by(hal::paging::PAGE as usize)
+            .filter_map(|v| aspace.translate(v))
+            .all(|phys| {
+                aspace
+                    .query(hhdm + phys)
+                    .is_none_or(|(_, f)| !f.contains(Flags::WRITABLE))
+            })
+    });
+    assert!(
+        aliases_read_only,
+        "harden: kernel code or read-only data is writable through the HHDM"
+    );
     info!("harden: verified - .text R-X, .rodata/.data NX, HHDM NX, no W+X");
 }
 

@@ -151,6 +151,44 @@ impl PageTableEntry {
     }
 }
 
+/// Size of a page mapped by a huge PD entry (2 MiB).
+pub const HUGE_2M: u64 = 1 << 21;
+/// Size of a page mapped by a huge PDPT entry (1 GiB).
+pub const HUGE_1G: u64 = 1 << 30;
+
+/// Child entry `i` of the table that replaces `huge`, a large-page entry of
+/// `huge_size` ([`HUGE_1G`] or [`HUGE_2M`]): together the 512 children map
+/// exactly what `huge` did, with the same flags. A 1 GiB page splits into
+/// 2 MiB pages; a 2 MiB page into 4 KiB pages, which moves the PAT bit from
+/// bit 12 (huge entries) to bit 7 (4 KiB entries, where bit 7 is PAT, not PS).
+/// `None` if `huge` is not a large page, `huge_size` is neither size, or
+/// `i >= 512`.
+#[must_use]
+pub const fn split_huge(huge: PageTableEntry, huge_size: u64, i: usize) -> Option<PageTableEntry> {
+    /// Bits 0 to 12 (flags, PS and PAT) and 52 to 63 (available, keys, NX).
+    const LOW: u64 = 0x1fff;
+    const HIGH: u64 = 0xfff0_0000_0000_0000;
+    const PAT_HUGE: u64 = 1 << 12;
+    const PAT_4K: u64 = 1 << 7;
+    if !huge.is_huge() || i >= ENTRY_COUNT {
+        return None;
+    }
+    let bits = huge.bits();
+    let base = bits & ADDR_MASK & !(huge_size - 1);
+    let child_size = huge_size / ENTRY_COUNT as u64;
+    let addr = base + i as u64 * child_size;
+    let keep = bits & (LOW | HIGH);
+    match huge_size {
+        HUGE_1G => Some(PageTableEntry(keep | addr)),
+        HUGE_2M => {
+            let pat = if bits & PAT_HUGE != 0 { PAT_4K } else { 0 };
+            let flags = keep & !(PAT_HUGE | PageTableFlags::HUGE.bits());
+            Some(PageTableEntry(flags | pat | addr))
+        }
+        _ => None,
+    }
+}
+
 /// A decoded x86-64 page-fault error code (the value the CPU pushes for #PF).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFaultError(u64);
@@ -239,6 +277,53 @@ pub const fn is_page_aligned(addr: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_2m_gives_4k_pages_with_the_same_permissions() {
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::GLOBAL
+            | PageTableFlags::NO_EXECUTE
+            | PageTableFlags::HUGE;
+        let huge = PageTableEntry::new(0x4020_0000, flags);
+        for i in [0, 1, 255, 511] {
+            let e = split_huge(huge, HUGE_2M, i).unwrap();
+            assert_eq!(e.addr(), 0x4020_0000 + i as u64 * PAGE_SIZE);
+            assert!(!e.is_huge(), "a 4 KiB entry must not carry PS");
+            let want = flags.bits() & !PageTableFlags::HUGE.bits();
+            assert_eq!(e.flags().bits(), want);
+        }
+    }
+
+    #[test]
+    fn split_2m_moves_pat_from_bit_12_to_bit_7() {
+        let huge = PageTableEntry::from_bits(0x0020_0000 | 1 << 12 | 0x83);
+        let e = split_huge(huge, HUGE_2M, 3).unwrap();
+        assert_eq!(e.bits() & (1 << 7), 1 << 7, "PAT lands in bit 7");
+        assert_eq!(e.addr(), 0x0020_3000, "bit 12 is not left in the address");
+    }
+
+    #[test]
+    fn split_1g_gives_2m_huge_pages() {
+        let huge = PageTableEntry::from_bits(0x4000_0000 | 1 << 12 | 1 << 63 | 0x183);
+        let e = split_huge(huge, HUGE_1G, 2).unwrap();
+        assert!(e.is_huge(), "children of a 1 GiB page are 2 MiB pages");
+        assert_eq!(e.bits() & 0x000f_ffff_ffe0_0000, 0x4000_0000 + 2 * HUGE_2M);
+        assert_eq!(e.bits() & (1 << 12), 1 << 12, "PAT stays in bit 12");
+        assert_eq!(e.bits() & (0x183 | 1 << 63), 0x183 | 1 << 63);
+        // Two levels of split reach the same 4 KiB frame directly.
+        let leaf = split_huge(e, HUGE_2M, 5).unwrap();
+        assert_eq!(leaf.addr(), 0x4000_0000 + 2 * HUGE_2M + 5 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn split_rejects_non_huge_entries_bad_sizes_and_indices() {
+        let huge = PageTableEntry::from_bits(0x0020_0000 | 0x83);
+        assert!(split_huge(huge, HUGE_2M, ENTRY_COUNT).is_none());
+        assert!(split_huge(huge, PAGE_SIZE, 0).is_none());
+        let table = PageTableEntry::new(0x5000, PageTableFlags::PRESENT);
+        assert!(split_huge(table, HUGE_2M, 0).is_none());
+    }
 
     #[test]
     fn entry_roundtrips_addr_and_flags() {

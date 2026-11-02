@@ -39,6 +39,15 @@ physical map non-executable in one cheap step, without rebuilding its large-page
 tables. This closes the "execute from the physmap alias" primitive. `CR3` is
 reloaded afterwards to flush the TLB.
 
+**The HHDM alias of the image is read-only (added for #119).** W^X per
+mapping is not enough: the HHDM maps the kernel image's frames read-write a
+second time, so a write through `hhdm + phys` would change code that then runs
+at the normal `.text` address. After hardening, the kernel splits the HHDM huge
+pages covering the image (`AddressSpace::split_huge`, using the pure
+`page_table::split_huge`) and makes the alias of every `.text` and `.rodata`
+page read-only and NX. It is read-only rather than unmapped so kernel reads
+through the HHDM keep working. Verification checks every alias page.
+
 **Enable `EFER.NXE`** before any of this, so the NX page-flag is honored.
 
 **Verify, don't assume.** After applying, the kernel reads back the actual
@@ -52,10 +61,13 @@ issue so this one stays small and low-risk.
 ## Consequences
 
 - The kernel enforces and verifies W^X/NX itself; a kernel bug that corrupts a
-  code pointer cannot turn writable data into execization, and the physmap can't
+  code pointer cannot turn writable data into executable code, and the physmap can't
   be used as an execution surface.
 - Relies on Limine's 4 KiB kernel mapping for in-place `protect`; if that ever
-  changes, the huge-page counter surfaces it and we would add page-splitting.
+  changes, the huge-page counter surfaces it. Page splitting exists now (#119)
+  and could be applied there too.
+- Splitting the HHDM around the image costs a few page-table frames (one per
+  2 MiB page split, plus one per 1 GiB page split) for the life of the kernel.
 - NX on the HHDM is set at the PML4 level; verification therefore checks the
   top-level entry, not the (unchanged) huge leaf.
 - A *negative* test (actually faulting on an NX/W^X violation) depends on the

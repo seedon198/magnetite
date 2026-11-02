@@ -55,6 +55,7 @@ The kernel sets **and verifies** its own permissions
 | `.rodata` | R + NX |
 | `.data` / `.bss` | RW + NX |
 | HHDM (direct physical map) | RW + NX |
+| HHDM alias of `.text` / `.rodata` frames | R + NX |
 
 - `EFER.NXE` is enabled so the NX bit is honored.
 - Section bounds come from page-aligned **linker symbols**; each page is
@@ -62,8 +63,16 @@ The kernel sets **and verifies** its own permissions
 - The HHDM is made non-executable by setting NX on its top-level entries (NX is
   cumulative across paging levels), closing the *execute-from-physmap-alias*
   primitive.
-- **No mapping is ever both writable and executable.** `kmain` reads the
-  resulting PTE/PML4 flags back and asserts the invariants.
+- The HHDM maps the kernel image's frames a second time. For `.text` and
+  `.rodata`, that alias is made **read-only** (`AddressSpace::split_huge`
+  breaks the covering 1 GiB / 2 MiB pages down to 4 KiB, then
+  `make_read_only`), so a write primitive cannot patch code or read-only
+  tables through the HHDM and run the result at the normal address (#119).
+  `.data` is writable through both mappings, as it is meant to be.
+- **No mapping is ever both writable and executable**, and no writable
+  mapping reaches kernel code or read-only data. `kmain` reads the resulting
+  PTE/PML4 flags back, including every HHDM alias page, and asserts the
+  invariants.
 
 ## 4. KASLR - PIE + Limine
 
