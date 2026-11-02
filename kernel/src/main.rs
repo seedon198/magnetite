@@ -29,7 +29,7 @@ use boot_info::BootInfo;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use hal::paging::{AddressSpace, Flags};
+use hal::paging::{AddressSpace, Flags, MapError};
 use hal::serial::SerialPort;
 use hal::sync::SpinLock;
 use thread::CONTEXTS;
@@ -357,6 +357,9 @@ fn init_paging(boot_info: &BootInfo) {
         "paging: out of frames populating the kernel half"
     );
     let probe = core::ptr::addr_of!(HEAP) as u64;
+    // Both self-test spaces are destroyed, and every frame they used comes
+    // back (#123).
+    let free_before = hal::frame::stats().map_or(0, |s| s.free);
     let isolated = AddressSpace::new_user(kernel).is_some_and(|mut user| {
         let Some(frame) = hal::frame::alloc_frame() else {
             return false;
@@ -372,6 +375,7 @@ fn init_paging(boot_info: &BootInfo) {
         let supervisor_only = user.kernel_half_supervisor_only();
         user.unmap(VA);
         hal::frame::free_frame(frame);
+        user.destroy_user();
         ok && supervisor_only
     });
     assert!(isolated, "paging: user space isolation self-test failed");
@@ -386,12 +390,28 @@ fn init_paging(boot_info: &BootInfo) {
             .map(hal::paging::USER_TOP, frame.addr(), Flags::USER)
             .is_err();
         hal::frame::free_frame(frame);
+        user.destroy_user();
         refused
     });
     assert!(
         top_refused,
         "paging: the last user page must not be mappable"
     );
+    let free_after = hal::frame::stats().map_or(0, |s| s.free);
+    assert_eq!(
+        free_after, free_before,
+        "paging: the user-space self-tests leaked frames"
+    );
+    // A mapping under one of the HHDM's large pages is refused, never written
+    // into the memory the large page maps (#120). Phys 2 MiB + 4 KiB is inside
+    // whatever covers it; a 4 KiB mapping there already exists instead.
+    let under = boot_info.hhdm_offset + hal::paging::HUGE_2M + hal::paging::PAGE;
+    let refused = hal::frame::alloc_frame().is_some_and(|frame| {
+        let r = kernel.map(under, frame.addr(), Flags::WRITABLE);
+        hal::frame::free_frame(frame);
+        matches!(r, Err(MapError::HugePage | MapError::AlreadyMapped))
+    });
+    assert!(refused, "paging: mapped through an HHDM large page");
     info!(
         "paging: user space isolated (lower half private, kernel half shared and supervisor-only)"
     );
@@ -428,6 +448,7 @@ fn harden_memory(boot_info: &BootInfo) {
                 Ok(()) => pages += 1,
                 Err(ProtectError::HugePage) => huge += 1,
                 Err(ProtectError::NotMapped) => {}
+                Err(ProtectError::BadFlags) => unreachable!("harden: section flags never set HUGE"),
             }
             v += hal::paging::PAGE;
         }

@@ -144,6 +144,15 @@ impl PageTableEntry {
         self.0 & ADDR_MASK
     }
 
+    /// The physical base of the large page this entry maps, for a huge entry
+    /// mapping `huge_size` bytes ([`HUGE_1G`] or [`HUGE_2M`]). Unlike
+    /// [`addr`](Self::addr), this drops bit 12, which is PAT in a large entry,
+    /// not an address bit.
+    #[must_use]
+    pub const fn huge_addr(self, huge_size: u64) -> u64 {
+        self.0 & ADDR_MASK & !(huge_size - 1)
+    }
+
     /// The entry's flags.
     #[must_use]
     pub const fn flags(self) -> PageTableFlags {
@@ -277,6 +286,16 @@ pub const fn is_page_aligned(addr: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn huge_addr_drops_the_pat_bit() {
+        let pat = 1 << 12;
+        let e = PageTableEntry::from_bits(0x4020_0000 | pat | 0x83);
+        assert_eq!(e.addr(), 0x4020_1000, "addr() keeps bit 12");
+        assert_eq!(e.huge_addr(HUGE_2M), 0x4020_0000);
+        let g = PageTableEntry::from_bits(0x8000_0000 | pat | 0x83);
+        assert_eq!(g.huge_addr(HUGE_1G), 0x8000_0000);
+    }
 
     #[test]
     fn split_2m_gives_4k_pages_with_the_same_permissions() {
