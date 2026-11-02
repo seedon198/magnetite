@@ -93,6 +93,30 @@ pub static USER_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 const KSTACK_BASE: u64 = 0xffff_fd00_0000_0000;
 const KSTACK_BYTES: u64 = 16 * 1024;
 const KSTACK_SLOT: u64 = PAGE + KSTACK_BYTES;
+/// The window's size: its one PML4 slot (512 GiB).
+const KSTACK_WINDOW: u64 = 1 << 39;
+
+/// Name `addr` if it lies in the kernel-stack window: a slot's guard page or
+/// its stack (#125). Registered with `hal::fault` as a classifier, since the
+/// window holds a guard per slot, too many for the region table.
+pub fn classify_stack(addr: u64) -> Option<&'static str> {
+    let off = addr.checked_sub(KSTACK_BASE)?;
+    if off >= KSTACK_WINDOW {
+        return None;
+    }
+    Some(if off % KSTACK_SLOT < PAGE {
+        "kernel stack guard"
+    } else {
+        "kernel stack"
+    })
+}
+
+/// A guard-page address and a stack address in kernel-stack window slot
+/// `slot`, for the fault classifier's self-check.
+pub fn kernel_stack_probe(slot: usize) -> (u64, u64) {
+    let guard = KSTACK_BASE + slot as u64 * KSTACK_SLOT;
+    (guard, guard + PAGE)
+}
 
 /// Record the kernel address space's root, which is in `CR3` now. Call once,
 /// right after the kernel space is installed.

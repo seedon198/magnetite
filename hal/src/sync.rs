@@ -108,3 +108,67 @@ impl<T> Drop for SpinGuard<'_, T> {
         }
     }
 }
+
+/// A lock that is only ever **tried**, and that leaves interrupts alone: for
+/// state a single drainer owns, such as the framebuffer console, which the
+/// logger writes with interrupts on (#116). A failed [`try_lock`] means
+/// another holder is active; the caller skips its work instead of waiting.
+///
+/// Never take a `TryLock` in interrupt context: an interrupt can arrive while
+/// it is held, and the handler would fail to get it.
+///
+/// [`try_lock`]: Self::try_lock
+pub struct TryLock<T> {
+    locked: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: all access to the inner value goes through `try_lock()`, which grants
+// it to one holder at a time via the `locked` flag.
+unsafe impl<T: Send> Sync for TryLock<T> {}
+// SAFETY: moving the lock moves its `T`; sound whenever `T` is `Send`.
+unsafe impl<T: Send> Send for TryLock<T> {}
+
+impl<T> TryLock<T> {
+    /// Create a new, unlocked `TryLock` wrapping `value`.
+    pub const fn new(value: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Take the lock if it is free, without spinning or touching interrupts.
+    pub fn try_lock(&self) -> Option<TryGuard<'_, T>> {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| TryGuard { lock: self })
+    }
+}
+
+/// Holds a [`TryLock`] until dropped, and derefs to its value.
+pub struct TryGuard<'a, T> {
+    lock: &'a TryLock<T>,
+}
+
+impl<T> Deref for TryGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: holding the guard means holding the lock: exclusive access.
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<T> DerefMut for TryGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`.
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<T> Drop for TryGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Ordering::Release);
+    }
+}

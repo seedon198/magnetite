@@ -11,7 +11,7 @@
 use core::fmt;
 
 use crate::font::FONT8X8_BASIC;
-use crate::sync::SpinLock;
+use crate::sync::TryLock;
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 8;
@@ -47,7 +47,9 @@ struct Console {
     bg: u32,
 }
 
-static CONSOLE: SpinLock<Option<Console>> = SpinLock::new(None);
+/// The console. Only the logger's single drainer writes it, so a `TryLock`
+/// suffices, and a scroll runs with interrupts on (#116).
+static CONSOLE: TryLock<Option<Console>> = TryLock::new(None);
 
 /// Initialize the framebuffer console. A no-op for unsupported pixel formats,
 /// in which case screen output is simply skipped.
@@ -67,14 +69,19 @@ pub fn init(info: FramebufferInfo) {
         info,
     };
     console.clear();
-    *CONSOLE.lock() = Some(console);
+    if let Some(mut slot) = CONSOLE.try_lock() {
+        *slot = Some(console);
+    }
 }
 
 /// Write a string to the framebuffer console, if one is initialized. Used by
-/// the kernel logger; a no-op when there is no framebuffer.
+/// the kernel logger's drainer; a no-op when there is no framebuffer, or if
+/// another writer holds the console.
 pub fn write_str(s: &str) {
-    if let Some(console) = CONSOLE.lock().as_mut() {
-        console.write(s);
+    if let Some(mut console) = CONSOLE.try_lock() {
+        if let Some(console) = console.as_mut() {
+            console.write(s);
+        }
     }
 }
 

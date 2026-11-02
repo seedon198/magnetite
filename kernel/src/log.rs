@@ -1,15 +1,19 @@
-//! Kernel logging: leveled macros over a serial sink.
+//! Kernel logging: leveled macros over the serial and framebuffer sinks.
 //!
-//! A minimal structured logger for M1. Records at or above the current level
-//! are formatted as `[LEVEL] message` and written to COM1, which is guarded by
-//! a [`SpinLock`] so logging is sound once concurrency exists. A second sink
-//! (the framebuffer console, #14) and richer formatting come later.
+//! Records at or above the current level are formatted as `[LEVEL] message`
+//! into a **pending ring** under a short interrupts-off lock, then **drained**
+//! to COM1 and the framebuffer console with interrupts on (#116). One caller
+//! drains at a time (a try-acquired flag): anyone who logs while another is
+//! draining, an interrupt handler included, only queues its record, and the
+//! drainer writes it out. So the slow part, a byte at a time over the UART
+//! and a framebuffer scroll, never runs with interrupts masked. If the ring
+//! fills, new bytes are dropped and the drainer reports how many.
 //!
 //! The logger is deliberately **not** used by the panic handler: a panic can
-//! occur while the serial lock is held, so the handler writes to its own fresh
-//! serial port instead of risking a deadlock here.
+//! occur while the ring lock is held, so the handler writes COM1 directly.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use hal::serial::SerialPort;
 use hal::sync::SpinLock;
@@ -48,12 +52,114 @@ impl Level {
 }
 
 static MAX_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
-static SERIAL: SpinLock<SerialPort> = SpinLock::new(SerialPort::com1());
+
+/// Bytes the pending ring holds: many records' worth.
+const PENDING_BYTES: usize = 8192;
+/// Bytes the drainer moves per turn of the lock.
+const CHUNK: usize = 256;
+
+/// Formatted bytes waiting to be written to the sinks.
+struct Pending {
+    buf: [u8; PENDING_BYTES],
+    /// Index of the oldest byte.
+    head: usize,
+    len: usize,
+    /// Bytes dropped because the ring was full, not yet reported.
+    lost: usize,
+}
+
+impl Pending {
+    /// Move up to `out.len()` of the oldest bytes into `out`, stopping before
+    /// an incomplete UTF-8 sequence at the end so text is never split inside a
+    /// character. Returns how many were moved.
+    fn take(&mut self, out: &mut [u8]) -> usize {
+        let mut n = self.len.min(out.len());
+        for (i, b) in out[..n].iter_mut().enumerate() {
+            *b = self.buf[(self.head + i) % PENDING_BYTES];
+        }
+        if let Err(e) = core::str::from_utf8(&out[..n]) {
+            if e.error_len().is_none() && e.valid_up_to() > 0 && n < self.len {
+                n = e.valid_up_to(); // the rest of that character is still queued
+            }
+        }
+        self.head = (self.head + n) % PENDING_BYTES;
+        self.len -= n;
+        n
+    }
+}
+
+impl fmt::Write for Pending {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            if self.len == PENDING_BYTES {
+                self.lost += 1;
+                continue;
+            }
+            self.buf[(self.head + self.len) % PENDING_BYTES] = b;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
+static PENDING: SpinLock<Pending> = SpinLock::new(Pending {
+    buf: [0; PENDING_BYTES],
+    head: 0,
+    len: 0,
+    lost: 0,
+});
+
+/// Set while one caller drains the ring to the sinks.
+static DRAINING: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the logging backend (the serial sink). Call once, early in
 /// `kmain`, before using the logging macros.
 pub fn init() {
-    SERIAL.lock().init();
+    SerialPort::com1().init();
+}
+
+/// Queue `args` as one record, then drain the ring unless someone else is.
+fn emit(args: fmt::Arguments) {
+    use fmt::Write;
+    // Formatting runs with interrupts off, but only copies into memory.
+    let _ = PENDING.lock().write_fmt(args);
+    drain();
+}
+
+/// Write everything queued to the serial port and the framebuffer console,
+/// with interrupts as the caller had them. If another caller is draining, it
+/// will write what was just queued, so return at once.
+fn drain() {
+    use fmt::Write;
+    loop {
+        if DRAINING.swap(true, Ordering::Acquire) {
+            return;
+        }
+        let serial = SerialPort::com1_configured();
+        let mut chunk = [0u8; CHUNK];
+        loop {
+            let (n, lost) = {
+                let mut p = PENDING.lock();
+                (p.take(&mut chunk), core::mem::take(&mut p.lost))
+            };
+            if n == 0 && lost == 0 {
+                break;
+            }
+            let text = core::str::from_utf8(&chunk[..n]).unwrap_or("\u{fffd}");
+            serial.write_bytes(text.as_bytes());
+            hal::framebuffer::write_str(text);
+            if lost > 0 {
+                let mut note = SerialPort::com1_configured();
+                let _ = writeln!(note, "[WARN] log: {lost} bytes dropped (ring full)");
+            }
+        }
+        DRAINING.store(false, Ordering::Release);
+        // A record queued after the last take but before the release would
+        // wait for the next log call: go round again if one is there.
+        if PENDING.lock().len == 0 {
+            return;
+        }
+    }
 }
 
 /// Set the maximum severity that will be emitted; records above it are dropped.
@@ -70,29 +176,17 @@ pub fn enabled(level: Level) -> bool {
 /// Emit one formatted record to every sink (serial, and the framebuffer console
 /// once initialized). Prefer the [`info!`](crate::info) family of macros over
 /// calling this directly.
-pub fn write(level: Level, args: core::fmt::Arguments) {
-    use core::fmt::Write;
+pub fn write(level: Level, args: fmt::Arguments) {
     if !enabled(level) {
         return;
     }
-    {
-        let mut serial = SERIAL.lock();
-        let _ = writeln!(serial, "[{}] {}", level.as_str(), args);
-    }
-    // Second sink: the framebuffer console (a no-op until initialized). Its own
-    // lock is taken after the serial lock is released, so the two never nest.
-    let _ = writeln!(hal::framebuffer::Writer, "[{}] {}", level.as_str(), args);
+    emit(format_args!("[{}] {}\n", level.as_str(), args));
 }
 
 /// Write one line to every sink with no level prefix, regardless of the
 /// current level. For the boot banner, not for log records.
-pub fn raw(args: core::fmt::Arguments) {
-    use core::fmt::Write;
-    {
-        let mut serial = SERIAL.lock();
-        let _ = writeln!(serial, "{args}");
-    }
-    let _ = writeln!(hal::framebuffer::Writer, "{args}");
+pub fn raw(args: fmt::Arguments) {
+    emit(format_args!("{args}\n"));
 }
 
 /// Emit a log record at an explicit [`Level`]. The level-specific macros

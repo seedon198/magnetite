@@ -40,11 +40,28 @@ pub fn register_region(name: &'static str, start: u64, end: u64) {
     }
 }
 
-/// The name of the registered region containing `addr`, preferring the
-/// narrowest match so a specific region (e.g. a stack guard) wins over an
-/// enclosing one (e.g. `.data/.bss`). `None` if no region contains `addr`.
+/// A classifier for address ranges too regular, or too many, for the region
+/// table: given an address, its name, or `None` to fall back to the table.
+pub type Classifier = fn(u64) -> Option<&'static str>;
+
+static CLASSIFIER: SpinLock<Option<Classifier>> = SpinLock::new(None);
+
+/// Install a [`Classifier`], consulted before the region table (the kernel
+/// names its kernel-stack window, one guard page per slot, this way; #125).
+pub fn register_classifier(f: Classifier) {
+    *CLASSIFIER.lock() = Some(f);
+}
+
+/// The name of the region containing `addr`: what the registered
+/// [`Classifier`] says, else the narrowest registered region, so a specific
+/// region (e.g. a stack guard) wins over an enclosing one (e.g.
+/// `.data/.bss`). `None` if nothing names `addr`.
 #[must_use]
 pub fn classify(addr: u64) -> Option<&'static str> {
+    let hook = *CLASSIFIER.lock();
+    if let Some(name) = hook.and_then(|f| f(addr)) {
+        return Some(name);
+    }
     let g = REGIONS.lock();
     let mut best: Option<&NamedRegion> = None;
     for region in g.0.iter().take(g.1).flatten() {
