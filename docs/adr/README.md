@@ -29,6 +29,7 @@ accepted** - ADRs record the outcome of that discussion, they don't replace it.
 | [0018](0018-synchronous-ipc.md) | Synchronous IPC over Endpoints | Accepted |
 | [0019](0019-first-user-task.md) | The first user task: loading, confinement and the syscall ABI | Accepted |
 | [0020](0020-capability-derivation-and-revoke.md) | Capability derivation tree and revoke | Proposed |
+| [0021](0021-fpu-sse-state.md) | FPU and SSE state: enabled for every thread, saved eagerly with fxsave | Accepted |
 
 New ADR: copy [0000-template.md](0000-template.md), take the next number, and
 open a PR labelled `adr`.

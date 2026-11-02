@@ -36,6 +36,14 @@ All notable changes are documented here. The format follows
 
 ### M4: Scheduling & userspace
 
+- FPU and SSE state per thread (#83), per
+  [ADR 0021](docs/adr/0021-fpu-sse-state.md). `hal::fpu::init` enables x87 and
+  SSE (SSE instructions in ring 3 raised `#UD` before) and captures a clean
+  default state; `thread::switch_to` saves the outgoing thread's registers and
+  restores the incoming one's with `fxsave`/`fxrstor`, eagerly, and reaping a
+  thread resets its area. A boot check runs two ring-3 threads that each keep
+  their own `xmm0` across switches; without the save and restore, one reads
+  the other's value.
 - The first user task (#82, PR 2 of 2), per
   [ADR 0019](docs/adr/0019-first-user-task.md). Two separately built Rust
   programs, `user/root` and `user/fault`, are loaded from Limine boot modules

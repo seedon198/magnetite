@@ -18,6 +18,7 @@ pub mod cpu;
 pub mod cpuid;
 pub mod fault;
 mod font;
+pub mod fpu;
 pub mod frame;
 pub mod framebuffer;
 pub mod gdt;

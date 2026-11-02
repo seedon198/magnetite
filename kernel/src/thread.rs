@@ -21,8 +21,11 @@ use crate::{KERNEL_SPACE, SCHED};
 /// Thread slots: boot (0), cooperative workers (1, 2), preemption spinners
 /// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11), the
 /// console server (12), the fault task (13), the root task (14) and the user
-/// demo's entry-path checks (15 to 17).
-pub const MAX: usize = 18;
+/// demo's entry-path checks (15 to 17) and its SSE-state check (18, 19).
+pub const MAX: usize = 20;
+
+/// Each thread's FPU and SSE state (#83), swapped at every context switch.
+static FPU: [hal::fpu::FpuArea; MAX] = [const { hal::fpu::FpuArea::new() }; MAX];
 
 /// Saved contexts, indexed by [`ThreadId`].
 pub static CONTEXTS: [Context; MAX] = [const { Context::new() }; MAX];
@@ -219,6 +222,7 @@ pub fn reap(t: ThreadId) -> usize {
         freed += free_kernel_stack(slot as usize - 1);
     }
     crate::user::forget(t);
+    FPU[t.0].reset();
     EXITED.fetch_and(!(1 << t.0), Ordering::Release);
     freed
 }
@@ -265,6 +269,10 @@ pub fn switch_to(cur: ThreadId, next: ThreadId) {
         CURRENT_ROOT.store(want, Ordering::Relaxed);
     }
     drop(spaces);
+    // FPU and SSE registers belong to the thread: save them for the one
+    // leaving and load the one arriving (#83). The kernel never uses them.
+    FPU[cur.0].save();
+    FPU[next.0].restore();
     hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
 }
 
