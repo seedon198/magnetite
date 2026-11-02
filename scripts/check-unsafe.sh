@@ -20,24 +20,37 @@ fail=0
 #   - the `hal` crate (hardware access)
 #   - the kernel's `boot` module (bootloader + linker glue: the entry point and
 #     Limine request placement)
-#   - `libs/sys` (the user side of `syscall` and the user entry point; it runs
-#     only in ring 3; ADR 0007's 2026-11-01 amendment)
+#   - `libs/sys/src/arch.rs` (the user side of `syscall` and the user entry
+#     point; it runs only in ring 3; ADR 0007's 2026-11-01 amendment)
 # See docs/adr/0007-unsafe-policy.md.
-is_trusted() { [[ "$1" == hal/* || "$1" == kernel/src/boot/* || "$1" == libs/sys/* ]]; }
+is_trusted() { [[ "$1" == hal/* || "$1" == kernel/src/boot/* || "$1" == libs/sys/src/arch.rs ]]; }
 
-# Find every `allow(unsafe_code)` ATTRIBUTE (inner or outer), ignoring mentions
-# inside comments/docs by requiring the line to start (after optional
-# whitespace) with the attribute form `#[...]` / `#![...]`.
+# Find every ATTRIBUTE (inner or outer, on one line or several) that names
+# `unsafe_code` with any level other than a plain `forbid` or `deny`: that
+# catches `allow(unsafe_code)`, `allow(dead_code, unsafe_code)`,
+# `expect(unsafe_code)`, `warn(...)` and `cfg_attr(..., allow(unsafe_code))`
+# alike (#115). Line comments are stripped first, so docs that mention an
+# attribute do not count.
 mapfile -t allow_hits < <(
-  grep -REn --include='*.rs' '^[[:space:]]*#!?\[[[:space:]]*allow\([[:space:]]*unsafe_code[[:space:]]*\)' \
-    kernel libs user xtask servers runtime tools 2>/dev/null || true
+  find kernel libs user xtask servers runtime tools -name '*.rs' 2>/dev/null | sort |
+    while IFS= read -r f; do
+      perl -0777 -ne '
+        s{//[^\n]*}{}g;
+        while (/#!?\[((?:[^\[\]]|\[(?1)\])*)\]/g) {
+          my $a = $1;
+          next unless $a =~ /\bunsafe_code\b/;
+          next if $a =~ /^\s*(?:forbid|deny)\s*\(\s*unsafe_code\s*\)\s*$/;
+          $a =~ s/\s+/ /g;
+          print "$ARGV: #[$a]\n";
+        }' "$f"
+    done
 )
 
 for hit in "${allow_hits[@]:-}"; do
   [[ -z "$hit" ]] && continue
   file="${hit%%:*}"
   if is_trusted "$file"; then continue; fi
-  echo "DENIED: allow(unsafe_code) outside hal/, kernel/src/boot/ and libs/sys/:"
+  echo "DENIED: an attribute lets unsafe_code through outside hal/, kernel/src/boot/ and libs/sys/src/arch.rs:"
   echo "  $hit"
   fail=1
 done
@@ -59,4 +72,4 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
-echo "unsafe-code policy OK: unsafe confined to hal/, kernel/src/boot/ and libs/sys/"
+echo "unsafe-code policy OK: unsafe confined to hal/, kernel/src/boot/ and libs/sys/src/arch.rs"

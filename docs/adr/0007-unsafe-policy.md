@@ -53,9 +53,10 @@ use `unsafe`. Pure-logic crates (`libs/*`, and later the user-space servers and
 tools) remain `#![forbid(unsafe_code)]`.
 
 This is **CI-enforced** (`scripts/check-unsafe.sh`): outside `hal/`, an
-`#[allow(unsafe_code)]`/`#![allow(unsafe_code)]` attribute may appear **only**
-within `kernel/src/boot/`; every other non-`hal` crate root must declare
-`forbid`/`deny(unsafe_code)`.
+attribute that names `unsafe_code` with any level but `forbid` or `deny` (an
+`allow`, also inside a list or a `cfg_attr`, an `expect`, a `warn`) may appear
+**only** within `kernel/src/boot/` and `libs/sys/src/arch.rs` (#115); every
+other non-`hal` crate root must declare `forbid`/`deny(unsafe_code)`.
 
 So the trusted, `unsafe`-bearing surface is exactly two small, reviewed places:
 the `hal` crate and the kernel `boot` module.
@@ -91,4 +92,5 @@ expansion the lint does not attribute to them.
 worst it can do is fault its own task. The trusted, `unsafe`-bearing surface
 becomes three small places: the `hal` crate, the kernel `boot` module, and
 `libs/sys`'s `arch` module. `scripts/check-unsafe.sh` allows the attribute in
-`libs/sys/` and checks the crate roots under `user/` like every other.
+`libs/sys/src/arch.rs` only, and checks the crate roots under `user/` like
+every other.

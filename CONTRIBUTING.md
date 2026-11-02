@@ -64,7 +64,10 @@ not be merged. In `hal`, every `unsafe` block needs a `// SAFETY:` comment.
    - `cargo clippy --all-targets -- -D warnings`
    - `cargo xtask test`
    - the kernel boots: `cargo xtask run`
-   - `scripts/check-unsafe.sh` and `scripts/check-dashes.sh`
+   - `scripts/check-unsafe.sh`, `scripts/check-dashes.sh` and
+     `scripts/check-asm-sections.sh`
+   - for changes that could behave differently when optimized, a release
+     boot: `KERNEL_PROFILE=release cargo xtask iso && scripts/boot-test.sh uefi`
 4. Open a PR referencing the issue (`Closes #12`) and fill in the template.
    If the PR completes a roadmap item, tick it in [`docs/roadmap.md`](docs/roadmap.md)
    in the same PR.
