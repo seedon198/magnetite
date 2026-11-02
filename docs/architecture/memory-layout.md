@@ -23,16 +23,16 @@ in ordinary **user** address spaces, not in the kernel half.
 | `0xffff800000000000` | HHDM + RAM | ≤ 64 TiB | **HHDM** - direct map of physical memory (offset from Limine) |
 | `0xfffffd0000000000` | grows up | 20 KiB per thread | **Kernel stacks** - per thread: an unmapped guard page, then 16 KiB RW+NX (PML4 slot 506, #82) |
 | `0xfffffe0000000000` | `0xfffffe0000000fff` | 4 KiB | **LAPIC registers** - xAPIC MMIO page, uncached RW+NX (PML4 slot 508, #80) |
-| `0xffffffff90000000` | grows up | window | **Kernel heap** - frames mapped on demand (RW+NX) |
-| *KASLR base* | … | 2 GiB window | **Kernel image** - randomized within the top 2 GiB |
+| `0xffffff8000000000` | `0xffffffff7fffffff` | ~510 GiB | **Kernel heap** - grows up from the base, frames mapped on demand (RW+NX) |
+| `0xffffffff80000000` | `0xffffffffffffffff` | 2 GiB | **Kernel image** - the KASLR window; Limine places the image anywhere inside it |
 
 The kernel image sits in the top 2 GiB so code uses `-mcmodel=kernel`-style
 sign-extended 32-bit addressing. **KASLR** randomizes its base at boot (the
 kernel is a PIE that Limine slides; see
 [ADR 0015](../adr/0015-kaslr.md)), so the table shows the window, not a fixed
-address. The kernel heap currently uses a fixed higher-half base that is not yet
-coordinated with the KASLR slide (see
-[memory-management.md](memory-management.md#known-limitations--future-work)).
+address. The kernel heap cannot collide with the slid image: it starts at
+`HEAP_BASE` (`0xffffff8000000000`) and `heap_grow` refuses to grow past
+`HEAP_LIMIT` (`0xffffffff80000000`), the bottom of that window (#61).
 
 ## Kernel image sections and W^X
 
@@ -40,6 +40,7 @@ coordinated with the KASLR slide (see
 |---|---|
 | `.text` | R-X |
 | `.rodata` | R-- (NX) |
+| RELRO (`.data.rel.ro`, `.dynamic`, `.got`) | R-- (NX), once Limine has relocated it (#126) |
 | `.data`, `.bss` | RW- (NX) |
 
 Sections are page-aligned in the linker script and mapped with exactly these

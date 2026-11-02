@@ -47,7 +47,8 @@ security tooling) is designed to run as isolated, least-privilege servers in
 user space. Two goals drive the design:
 
 1. **Hardened by construction.** Written in Rust, with **no `unsafe` code
-   outside one small, audited hardware crate**. Every resource is reached
+   outside three small, audited places**: the hardware crate, the kernel's
+   boot glue, and the user side of the syscall stubs. Every resource is reached
    through an unforgeable **capability**; there is no ambient authority, so a
    bug in a parser cannot reach the kernel or anything it was not handed.
 2. **A foundation for security work.** The long-term aim is a platform that
@@ -60,7 +61,7 @@ What works on `main` today, verified on every boot in QEMU:
 
 | | |
 |---|---|
-| **Memory safety** | No `unsafe` outside `hal`, where every block carries a `// SAFETY:` justification, and the kernel's `boot` module, which holds only linker glue. Pure crates `#![forbid(unsafe_code)]`; the kernel `#![deny(unsafe_code)]`; CI-checked ([ADR 0007](docs/adr/0007-unsafe-policy.md)) |
+| **Memory safety** | No `unsafe` outside `hal`, the kernel's `boot` module (linker and bootloader glue) and `libs/sys/src/arch.rs` (the ring-3 syscall stubs); every block carries a `// SAFETY:` justification. Pure crates and user programs `#![forbid(unsafe_code)]`; the kernel `#![deny(unsafe_code)]`; CI-checked ([ADR 0007](docs/adr/0007-unsafe-policy.md)) |
 | **Exploit mitigations** | W^X enforced and self-verified, NX on everything including the direct map, SMEP and SMAP, KASLR, unmapped stack guard pages |
 | **Capabilities** | CNode-backed capability spaces, Untyped memory and retype (the kernel never heap-allocates objects), attenuate-only rights, rights-checked invocation |
 | **Threads and IPC** | Context switching, LAPIC-timer preemption, ring-3 entry and a `syscall`/`sysret` boundary; blocking synchronous IPC with badges and capability transfer under `GRANT` |
@@ -76,7 +77,7 @@ What works on `main` today, verified on every boot in QEMU:
 | Area | Choice | Why | ADR |
 |---|---|---|---|
 | Language | **Rust** (`no_std`) | Memory safety removes whole exploit classes from the kernel | [0001](docs/adr/0001-implementation-language.md) |
-| `unsafe` policy | **`forbid(unsafe)`** except an audited `hal` crate | Shrinks the trusted, unsafe surface to an auditable core | [0007](docs/adr/0007-unsafe-policy.md) |
+| `unsafe` policy | **No `unsafe`** outside `hal`, `kernel/src/boot` and `libs/sys/src/arch.rs` | Shrinks the trusted, unsafe surface to an auditable core | [0007](docs/adr/0007-unsafe-policy.md) |
 | Kernel model | **Microkernel** | Minimal ring-0 TCB; isolate drivers, network and filesystems in user space | [0004](docs/adr/0004-kernel-architecture.md) |
 | Security model | **Capabilities** (least privilege) | No ambient authority; every resource is an unforgeable handle | [0006](docs/adr/0006-security-model.md) |
 | Offensive layer | **Native tools + scripting runtime** | Write and run security tooling without rebuilding the system | [0008](docs/adr/0008-native-tooling.md) |
@@ -169,8 +170,8 @@ Details and the hardening checklist: [docs/roadmap.md](docs/roadmap.md).
 
 ```
 .
-├── kernel/      # the microkernel (no_std, forbid(unsafe))
-├── hal/         # the ONLY crate allowed `unsafe`: CPU tables, paging, context switch, asm
+├── kernel/      # the microkernel (no_std, deny(unsafe_code); boot/ is the one exception)
+├── hal/         # the hardware crate, allowed `unsafe`: CPU tables, paging, context switch, asm
 ├── libs/        # pure no_std crates, host-tested
 │   ├── capability/    # capability model and message ABI
 │   ├── sched/         # scheduling policy

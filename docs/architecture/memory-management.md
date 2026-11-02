@@ -27,8 +27,10 @@ map ([ADR 0010](../adr/0010-bitmap-frame-allocator.md)).
   frames: a double free, or a free of frame 0, the bitmap, a reserved range or
   a hole such as MMIO (`FreeError::NotPoolFrame`, #122), is treated as a
   kernel bug instead of quietly adding the frame to the pool.
-- Single-frame allocation only; large-page / DMA-contiguous allocation is
-  deferred until a consumer needs it.
+- Single frames, plus `alloc_contiguous(n)`: `n` (a power of two) physically
+  contiguous frames aligned to `n`, which backs the root task's Untyped
+  region. Large-page and DMA-specific allocation is deferred until a consumer
+  needs it.
 
 ## 2. Address spaces & page tables - `page-table` + `hal::paging`
 
@@ -44,8 +46,10 @@ The kernel runs on 4-level page tables it owns
   PML4, **inherits the bootloader's higher-half entries** (kernel image + HHDM),
   and switches `CR3` to it. The lower half is managed at 4 KiB granularity;
   `translate` also resolves inherited 2 MiB / 1 GiB huge pages.
-- Each future user task will get its own PML4; tasks share nothing by default
-  (the memory-level expression of the [capability model](security-model.md)).
+- Each user task has its own PML4 (`AddressSpace::new_user`, #82): a private
+  lower half and the kernel half's top-level entries copied in, supervisor-only.
+  Tasks share nothing by default (the memory-level expression of the
+  [capability model](security-model.md)).
 
 ## 3. W^X + NX - `hal::paging` + `kmain`
 
@@ -127,10 +131,10 @@ to `GlobalAlloc`, so `Box` / `Vec` / `String` work in the kernel
   overflow panic or a wrapped, too-small block (#121).
 - An infallible allocation that fails panics with the failed size, through the
   panic handler and its backtrace (stable `no_std` behaviour, #68).
-- The heap lives in a dedicated higher-half window
-  (`0xffffffff90000000`). *Known limitation:* this window is a fixed base and is
-  not yet coordinated with the KASLR slide; making it collision-checked /
-  slide-aware is future work.
+- The heap lives in its own window, `HEAP_BASE` (`0xffffff8000000000`) up to
+  `HEAP_LIMIT` (`0xffffffff80000000`), the bottom of the top-2 GiB KASLR
+  window, and never grows past it, so it cannot collide with the slid kernel
+  image (#61).
 
 ## 8. Page-fault diagnostics - `page-table` + `hal::fault` + `hal::idt`
 
@@ -162,11 +166,11 @@ the serial log; the pure crates add host unit tests.
 
 ## Known limitations / future work
 
-- Large-page / DMA-contiguous physical allocation (deferred from #38).
+- Large-page and DMA-specific physical allocation (deferred from #38;
+  `alloc_contiguous` covers aligned power-of-two runs).
 - `unmap` frees the intermediate tables it empties (#64), but never the root
   or a kernel-half PDPT (shared by every user space).
 - HHDM-base randomization pending a newer Limine protocol revision.
-- The kernel heap window is a fixed base, not yet coordinated with KASLR.
 - A negative W^X/NX fault test (deliberately faulting) builds on the recoverable
   probe and the #PF handler; the probe primitive exists, broader fault-injection
   testing is future work.

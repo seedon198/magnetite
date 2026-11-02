@@ -334,6 +334,13 @@ All notable changes are documented here. The format follows
     NX, HHDM alias included, once Limine has applied its relocations.
   - Every GitHub Action is pinned to a full commit SHA with its version in a
     comment; Dependabot proposes action updates weekly.
+- Documentation brought in line with the code (#91, #108, #118, #127, #134):
+  the heap window and KASLR in `memory-layout.md` and `memory-management.md`
+  (also contiguous allocation and per-task address spaces), the three places
+  `unsafe` is allowed in the README and CONTRIBUTING (which now lists the
+  bare-metal clippy command too), the capability work that moves from M4 to M5
+  (#162 and #156, now on the roadmap), and doc comments that had drifted onto
+  the wrong items.
 
 ## [0.3.0] - 2026-10-28
 

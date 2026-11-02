@@ -280,8 +280,6 @@ extern "C" fn kmain_guarded(_: u64) -> ! {
     hal::cpu::halt_loop();
 }
 
-/// Bring up the physical frame allocator from the boot memory map and exercise
-/// it with a small alloc/free smoke test.
 /// The user programs (#82) must have been loaded, and their memory must never
 /// be handed out: it lies outside every usable region (Limine reports it as
 /// `KernelAndModules`).
@@ -314,6 +312,8 @@ fn check_modules(boot_info: &BootInfo) {
     );
 }
 
+/// Bring up the physical frame allocator from the boot memory map and exercise
+/// it with a small alloc/free smoke test.
 fn init_frames(boot_info: &BootInfo) {
     use boot_info::RegionKind;
     use hal::frame::Region;
@@ -1016,7 +1016,8 @@ fn yield_now() {
 }
 
 /// Exit the running thread: take it out of the run queue for good and switch
-/// to the next one. Its context is never resumed (and its stack is leaked).
+/// to the next one. Its context is never resumed; its kernel stack, address
+/// space and other resources are reclaimed later by `thread::reap`.
 fn exit_current() -> ! {
     hal::cpu::disable_interrupts();
     let cur = SCHED
