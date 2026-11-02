@@ -29,9 +29,13 @@ fi
 
 fail=0
 check() {
-    local label="$1" elf="$2" sym kind
+    local label="$1" elf="$2" sym kind symbols
+    # Read the symbol table once. Piping llvm-nm into an awk that exits at the
+    # first match can kill llvm-nm with SIGPIPE, which pipefail turns into a
+    # spurious failure.
+    symbols="$("$nm" "$elf")"
     for sym in "${SYMBOLS[@]}"; do
-        kind="$("$nm" "$elf" | awk -v s="$sym" '$3 == s { print $2; exit }')"
+        kind="$(awk -v s="$sym" '$3 == s { print $2; exit }' <<< "$symbols")"
         if [[ "$kind" != "T" && "$kind" != "t" ]]; then
             echo "DENIED ($label): $sym is '${kind:-missing}', not a .text symbol"
             fail=1
