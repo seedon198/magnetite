@@ -139,10 +139,19 @@ pub fn exit() -> ! {
 
 /// Invoke method `label` on the kernel object in `slot` with up to four
 /// argument words; returns the result words.
+///
+/// # Errors
+/// [`SysError::InvalidSyscall`], without entering the kernel, if `args` has
+/// more words than the ABI's message registers carry: dropping the rest would
+/// make the kernel see a different request (#135). Otherwise the kernel's
+/// answer.
 pub fn invoke(slot: u64, label: u32, args: &[u64]) -> Result<[u64; MSG_REGISTERS], SysError> {
+    if args.len() > MSG_REGISTERS {
+        return Err(SysError::InvalidSyscall);
+    }
     let mut mr = [0; MSG_REGISTERS];
-    let n = args.len().min(MSG_REGISTERS);
-    mr[..n].copy_from_slice(&args[..n]);
+    let n = args.len();
+    mr[..n].copy_from_slice(args);
     call(slot, MessageInfo::new(label, n as u8, 0), mr, NO_SLOT).map(|r| r.mr)
 }
 

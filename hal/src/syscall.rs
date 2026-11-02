@@ -4,8 +4,10 @@
 //! (`EFER.SCE`, `STAR`, `LSTAR`, `FMASK`), [`syscall_entry`] is the kernel entry
 //! stub, and [`enter_user_once`] drops to ring 3 via `iretq`. The other entry
 //! paths are closed: `CSTAR` (a `syscall` from compatibility mode) points at a
-//! stub that hands the caller to a registered [`CompatHandler`] to be killed,
-//! and `SYSENTER_CS` is 0, so `sysenter` faults in ring 3 (#102). The
+//! stub that hands the caller to a registered [`KillHandler`] to be killed,
+//! and `SYSENTER_CS` is 0, so `sysenter` faults in ring 3 (#102). The return
+//! path kills the caller the same way, rather than `sysretq` to a
+//! non-canonical address (#103). The
 //! message-register ABI is [`capability::abi`]: `rdi` = invoked capability id,
 //! `rsi` = packed `MessageInfo`, `rdx`/`r8`/`r9`/`r10` = message registers 0-3
 //! (`rcx`/`r11` are reserved by the CPU for the return RIP/RFLAGS); `rax`
@@ -84,11 +86,21 @@ pub type Handler = fn(&mut SyscallArgs) -> u64;
 
 static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Ends the current thread after a `syscall` from compatibility mode. Runs on
-/// that thread's kernel stack with interrupts off and never returns to it.
-pub type CompatHandler = fn() -> !;
+/// Why the syscall boundary ends the calling thread instead of returning to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kill {
+    /// A `syscall` from compatibility mode (the `CSTAR` entry, #102).
+    CompatSyscall,
+    /// The return address is not canonical: `sysretq` would raise `#GP` in
+    /// ring 0 with the user's stack pointer loaded (#103).
+    NonCanonicalReturn,
+}
 
-static COMPAT_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+/// Ends the current thread for a [`Kill`] reason. Runs on that thread's kernel
+/// stack with interrupts off and never returns to it.
+pub type KillHandler = fn(Kill) -> !;
+
+static KILL_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Fallback kernel stack for the syscall entry stub, used until the kernel
 /// installs a thread's own with [`set_kernel_stack`].
@@ -111,10 +123,10 @@ pub fn register(handler: Handler) {
     HANDLER.store(handler as *mut (), Ordering::Release);
 }
 
-/// Register the handler that kills a thread whose `syscall` arrived from
-/// compatibility mode. Call before entering ring 3.
-pub fn register_compat(handler: CompatHandler) {
-    COMPAT_HANDLER.store(handler as *mut (), Ordering::Release);
+/// Register the handler that kills a thread the syscall boundary will not
+/// return to (see [`Kill`]). Call before entering ring 3.
+pub fn register_kill(handler: KillHandler) {
+    KILL_HANDLER.store(handler as *mut (), Ordering::Release);
 }
 
 /// Set the kernel stack the entry stub switches to. The kernel calls this on
@@ -175,18 +187,25 @@ extern "C" fn syscall_dispatch(args: *mut SyscallArgs) -> u64 {
     }
 }
 
-/// The Rust side of the CSTAR stub: hand the caller to the compat handler.
-/// With none registered, there is no thread to end, so halt the kernel.
+/// The Rust side of the stubs' kill paths: hand the caller to the kill
+/// handler with `reason` (0 = [`Kill::CompatSyscall`], 1 =
+/// [`Kill::NonCanonicalReturn`]). With none registered, there is no thread to
+/// end, so halt the kernel.
 #[unsafe(no_mangle)]
-extern "C" fn syscall_compat_dispatch() -> ! {
-    let raw = COMPAT_HANDLER.load(Ordering::Acquire);
+extern "C" fn syscall_kill_dispatch(reason: u64) -> ! {
+    let raw = KILL_HANDLER.load(Ordering::Acquire);
     assert!(
         !raw.is_null(),
-        "syscall: compatibility-mode syscall with no handler registered"
+        "syscall: a thread must be killed but no handler is registered"
     );
-    // SAFETY: `raw` is a `CompatHandler` fn pointer stored by `register_compat`.
-    let handler: CompatHandler = unsafe { core::mem::transmute(raw) };
-    handler()
+    let kill = if reason == 0 {
+        Kill::CompatSyscall
+    } else {
+        Kill::NonCanonicalReturn
+    };
+    // SAFETY: `raw` is a `KillHandler` fn pointer stored by `register_kill`.
+    let handler: KillHandler = unsafe { core::mem::transmute(raw) };
+    handler(kill)
 }
 
 extern "C" {
@@ -249,19 +268,34 @@ global_asm!(
     "    mov r9,  [rsp + 40]",
     "    mov r10, [rsp + 48]",
     "    add rsp, 72", // pop the nine SyscallArgs words (rax holds status)
+    // The return RIP (at [rsp + 8]) must be canonical, bits 47 to 63 all
+    // zero: `sysretq` to anything else raises #GP in ring 0 after rsp is the
+    // user's (#103). USER_TOP keeps code out of the last user page, so this
+    // never fires today; it is the backstop if that changes.
+    "    cmp word ptr [rsp + 14], 0", // bits 48 to 63
+    "    jne 3f",
+    "    test byte ptr [rsp + 13], 0x80", // bit 47
+    "    jnz 3f",
     "    pop r11",
     "    pop rcx",
     "    add rsp, 8", // padding
     "    pop rbp",    // user RBP
     "    pop rsp",    // user RSP
     "    sysretq",
+    "3:", // still on this thread's kernel stack; never returns to ring 3
+    "    and rsp, -16",
+    "    xor ebp, ebp",
+    "    mov edi, 1", // Kill::NonCanonicalReturn
+    "    call syscall_kill_dispatch",
+    "    ud2",
     //
     ".global syscall_compat_entry",
     ".p2align 4",
     "syscall_compat_entry:",
     "    mov rsp, [rip + SYSCALL_KSTACK_TOP]",
     "    xor ebp, ebp",
-    "    call syscall_compat_dispatch",
+    "    xor edi, edi", // Kill::CompatSyscall
+    "    call syscall_kill_dispatch",
     "    ud2",
     //
     ".global enter_user_once_asm",

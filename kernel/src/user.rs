@@ -136,26 +136,46 @@ pub fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
     let t = SCHED.lock().current().expect("user: a running thread");
     KILLED_BY[t.0].store(frame.vector + 1, Ordering::Relaxed);
     KILLED_AT[t.0].store(frame.rip, Ordering::Relaxed);
-    crate::info!(
-        "user: thread {} killed: {} at {:#x}, rip={:#x}",
-        t.0,
-        hal::idt::exception_name(frame.vector),
-        hal::idt::fault_address(),
-        frame.rip
-    );
+    let name = hal::idt::exception_name(frame.vector);
+    // CR2 is meaningful only for #PF; for anything else it still holds the
+    // last page fault taken anywhere, possibly another context's (#104).
+    if frame.vector == 14 {
+        crate::info!(
+            "user: thread {} killed: {name} at {:#x}, error {:#x}, rip={:#x}",
+            t.0,
+            hal::idt::fault_address(),
+            frame.error_code,
+            frame.rip
+        );
+    } else {
+        crate::info!(
+            "user: thread {} killed: {name}, error {:#x}, rip={:#x}",
+            t.0,
+            frame.error_code,
+            frame.rip
+        );
+    }
     crate::exit_current()
 }
 
-/// A `syscall` from compatibility mode (the `CSTAR` entry): end the thread.
-/// The GDT gives ring 3 no way into compatibility mode, so this is a backstop.
-/// Registered once in `kmain`.
-pub fn compat_syscall() -> ! {
+/// The syscall boundary will not return to the current thread: end it. Both
+/// causes are backstops that ring 3 cannot reach today: the GDT gives it no
+/// way into compatibility mode, and `USER_TOP` keeps code out of the last
+/// user page. Registered once in `kmain`.
+pub fn syscall_killed(reason: hal::syscall::Kill) -> ! {
     let t = SCHED.lock().current().expect("user: a running thread");
-    crate::info!(
-        "user: thread {} killed: syscall from compatibility mode",
-        t.0
-    );
+    let why = match reason {
+        hal::syscall::Kill::CompatSyscall => "syscall from compatibility mode",
+        hal::syscall::Kill::NonCanonicalReturn => "non-canonical syscall return address",
+    };
+    crate::info!("user: thread {} killed: {why}", t.0);
     crate::exit_current()
+}
+
+/// Forget thread `t`'s debug-syscall permission, so a later task given the
+/// same id cannot use them (#131). Called when `t` is reaped.
+pub fn forget(t: ThreadId) {
+    DEBUG_THREADS.fetch_and(!(1 << t.0), Ordering::Relaxed);
 }
 
 /// Frames currently free.
@@ -322,6 +342,11 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     // Every frame the eight tasks used (code, stack, page tables, kernel stack)
     // comes back once they are reaped.
     let reclaimed: usize = demo_threads().map(thread::reap).sum();
+    assert_eq!(
+        DEBUG_THREADS.load(Ordering::Relaxed),
+        0,
+        "user: reaped threads kept their debug syscalls"
+    );
     let free_after = free_frames();
     assert_eq!(
         free_after,
