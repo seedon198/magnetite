@@ -59,6 +59,10 @@ pub enum ProtectError {
 /// in ring 0 on Intel with the user's stack pointer already loaded.
 pub const USER_TOP: u64 = 0x7fff_ffff_f000;
 
+// A user instruction ends at or below `USER_TOP`, so the return address
+// `syscall` saves is canonical; the entry stub checks it anyway (#103).
+const _: () = assert!(USER_TOP < 0x8000_0000_0000);
+
 /// A virtual address space: a root PML4 and the HHDM offset used to reach its
 /// tables.
 pub struct AddressSpace {

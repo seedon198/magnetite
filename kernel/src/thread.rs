@@ -143,6 +143,7 @@ pub fn reap(t: ThreadId) -> usize {
     if slot != 0 {
         freed += free_kernel_stack(slot as usize - 1);
     }
+    crate::user::forget(t);
     EXITED.fetch_and(!(1 << t.0), Ordering::Release);
     freed
 }

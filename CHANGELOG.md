@@ -225,6 +225,19 @@ All notable changes are documented here. The format follows
   `channel = "stable"`, so each new release could change lints under
   `-D warnings` and the binaries contributors built. It is now pinned to
   `1.99.1`, to be bumped deliberately in its own PR.
+- Syscall boundary hardening and fixes (#103, #104, #131, #135):
+  - The `sysretq` epilogue checks that the return address is canonical and
+    kills the caller otherwise, rather than raising `#GP` in ring 0 on the
+    user's stack. The compat-mode hook from #102 becomes a general
+    `hal::syscall::register_kill` with a `Kill` reason. A compile-time check
+    pins the `USER_TOP` invariant that keeps this unreachable today.
+  - A ring-3 fault report prints CR2 only for `#PF`, plus the error code; for
+    other exceptions CR2 held some other context's last fault.
+  - Reaping a thread clears its debug-syscall permission, so a later task
+    given the same id cannot use them.
+  - `sys::invoke` refuses more than four argument words with
+    `InvalidSyscall` instead of silently dropping the rest; the root task
+    checks it.
 
 ## [0.3.0] - 2026-10-28
 

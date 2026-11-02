@@ -83,6 +83,13 @@ fn main() -> ! {
     ok &= check("retype a Notification into slot 4", retype, Ok(()));
     let signal = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b101]);
     ok &= check("signal it", signal, Ok(()));
+    // More arguments than the ABI carries are refused, not truncated (#135).
+    let five = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b10, 0, 0, 0, 0]);
+    ok &= check(
+        "invoke with five arguments",
+        five,
+        Err(SysError::InvalidSyscall),
+    );
 
     // Slots it does not hold: the null slot, an empty one, one past its CNode.
     for (slot, what) in [
