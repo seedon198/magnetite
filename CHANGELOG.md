@@ -188,6 +188,13 @@ All notable changes are documented here. The format follows
   builds of one commit could boot different bootloaders. `xtask` now pins the
   v11.4.1 commit, fetches exactly that commit, and on every build checks
   that `limine/` is still at it with no tracked file modified.
+- Kernel `.text` and `.rodata` stayed writable through the HHDM alias (#119),
+  bypassing W^X: a write to `hhdm + phys` changed code that then ran at the
+  normal address. `harden_memory` now splits the HHDM huge pages covering the
+  image down to 4 KiB (a new pure `page_table::split_huge`, host-tested, and
+  `AddressSpace::split_huge`) and makes the alias of every code and read-only
+  page read-only and NX (`AddressSpace::make_read_only`, which keeps cache
+  and global bits). The boot verification checks every alias page.
 
 ### Fixed
 

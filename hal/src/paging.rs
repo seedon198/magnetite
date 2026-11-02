@@ -18,7 +18,9 @@
 use core::arch::asm;
 
 use frame_alloc::PhysFrame;
-use page_table::{table_indices, PageTableEntry, PageTableFlags, ENTRY_COUNT, PAGE_SIZE};
+use page_table::{
+    table_indices, PageTableEntry, PageTableFlags, ENTRY_COUNT, HUGE_1G, HUGE_2M, PAGE_SIZE,
+};
 
 pub use page_table::{PageTableFlags as Flags, PAGE_SIZE as PAGE};
 
@@ -385,6 +387,73 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Make sure `virt` is mapped by a 4 KiB leaf: replace each huge entry on
+    /// its path (an inherited 1 GiB or 2 MiB page, e.g. in the HHDM) with a
+    /// table of smaller pages that maps exactly the same range with the same
+    /// flags, so 4 KiB-granular calls such as [`make_read_only`] can then act
+    /// on it. Nothing visible changes, so no TLB flush is needed. A no-op if
+    /// the path has no huge entry.
+    ///
+    /// [`make_read_only`]: Self::make_read_only
+    ///
+    /// # Errors
+    /// [`MapError::OutOfFrames`] if no frame is free for a new table; the
+    /// mapping is then unchanged (a 1 GiB split already done stays, harmlessly).
+    pub fn split_huge(&mut self, virt: u64) -> Result<(), MapError> {
+        let idx = table_indices(virt);
+        let pml4e = self.entry(self.root.addr(), idx[0]);
+        if !pml4e.is_present() {
+            return Ok(());
+        }
+        let mut table = pml4e.addr();
+        for (&i, size) in idx[1..3].iter().zip([HUGE_1G, HUGE_2M]) {
+            let e = self.entry(table, i);
+            if !e.is_present() {
+                return Ok(());
+            }
+            if e.is_huge() {
+                self.replace_huge(table, i, e, size)?;
+            }
+            table = self.entry(table, i).addr();
+        }
+        Ok(())
+    }
+
+    /// Make the existing 4 KiB mapping of `virt` read-only and non-executable,
+    /// keeping its target and every other bit (cache type, global). Flushes
+    /// the page, including a global or huge TLB entry still covering it.
+    ///
+    /// # Errors
+    /// [`ProtectError::NotMapped`] if `virt` has no leaf mapping, or
+    /// [`ProtectError::HugePage`] if it is mapped by a large page (see
+    /// [`split_huge`](Self::split_huge)).
+    pub fn make_read_only(&mut self, virt: u64) -> Result<(), ProtectError> {
+        let idx = table_indices(virt);
+        let mut table = self.root.addr();
+        for &i in &idx[..3] {
+            let e = self.entry(table, i);
+            if !e.is_present() {
+                return Err(ProtectError::NotMapped);
+            }
+            if e.is_huge() {
+                return Err(ProtectError::HugePage);
+            }
+            table = e.addr();
+        }
+        let leaf = self.entry_ptr(table, idx[3]);
+        // SAFETY: in-bounds HHDM entry of a present table.
+        let bits = unsafe { leaf.read_volatile() };
+        if !PageTableEntry::from_bits(bits).is_present() {
+            return Err(ProtectError::NotMapped);
+        }
+        let ro = (bits & !PageTableFlags::WRITABLE.bits()) | PageTableFlags::NO_EXECUTE.bits();
+        // SAFETY: as above; clearing WRITABLE and setting NX on the leaf,
+        // keeping its address and other bits.
+        unsafe { leaf.write_volatile(ro) }
+        invlpg(virt);
+        Ok(())
+    }
+
     /// The physical target and effective leaf flags for `virt` (resolving huge
     /// pages), or `None` if unmapped. Used to verify permissions.
     #[must_use]
@@ -460,6 +529,40 @@ impl AddressSpace {
     }
 
     // --- internal walk helpers (all HHDM-based) ---
+
+    /// Replace huge entry `i` (`e`, mapping `size` bytes) of the table at
+    /// `table_phys` with a pointer to a new table of 512 children that map the
+    /// same range with the same flags.
+    fn replace_huge(
+        &self,
+        table_phys: u64,
+        i: usize,
+        e: PageTableEntry,
+        size: u64,
+    ) -> Result<(), MapError> {
+        let new = frame::alloc_frame().ok_or(MapError::OutOfFrames)?;
+        for c in 0..ENTRY_COUNT {
+            let child = page_table::split_huge(e, size, c).expect("paging: split a huge entry");
+            // SAFETY: `new` is a fresh, zeroed frame reached via the HHDM and
+            // `c < 512`; nothing maps it as a table yet.
+            unsafe { self.entry_ptr(new.addr(), c).write_volatile(child.bits()) }
+        }
+        // The new link must allow everything a child allows (write and user
+        // are AND-ed across levels); the children keep the real permissions.
+        let mut link = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        if e.flags().contains(PageTableFlags::USER) {
+            link |= PageTableFlags::USER;
+        }
+        // SAFETY: in-bounds HHDM entry of a present table. One aligned 8-byte
+        // store swaps the huge page for an equivalent table, so the walker
+        // sees either the old or the new mapping, never a mix; the children
+        // were written first (x86 keeps stores in order).
+        unsafe {
+            self.entry_ptr(table_phys, i)
+                .write_volatile(PageTableEntry::new(new.addr(), link).bits());
+        }
+        Ok(())
+    }
 
     /// Pointer to entry `i` of the table at physical `table_phys`, via the HHDM.
     fn entry_ptr(&self, table_phys: u64, i: usize) -> *mut u64 {
