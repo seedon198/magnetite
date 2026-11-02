@@ -337,10 +337,15 @@ fn init_paging(boot_info: &BootInfo) {
     info!("paging: running on our own PML4 (higher half inherited)");
     *KERNEL_SPACE.lock() = Some(aspace);
 
+    // The self-test maps and unmaps one page in fresh tables; unmap frees
+    // the tables it empties, so every frame comes back (#64).
+    let before = hal::frame::stats().map_or(0, |s| s.free);
     let ok = KERNEL_SPACE
         .lock()
         .as_mut()
         .is_some_and(AddressSpace::selftest);
+    let after = hal::frame::stats().map_or(0, |s| s.free);
+    assert_eq!(after, before, "paging: map then unmap leaked page tables");
     if ok {
         info!("paging: map/translate/unmap self-test passed");
     } else {

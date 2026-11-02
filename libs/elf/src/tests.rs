@@ -295,3 +295,74 @@ fn zero_size_loads_are_ignored() {
     );
     assert_eq!(parsed(&b).unwrap().segments().len(), 1);
 }
+
+#[test]
+fn refuses_images_over_the_page_cap() {
+    // One read-only page of text, then a bss that brings the image to the cap,
+    // then one page past it.
+    let text = (0x40_0000, 0x1000, 0x1000, 0x10, PF_R | PF_X);
+    let at_cap = (MAX_IMAGE_PAGES - 1) * 4096;
+    let ok = elf(
+        &[text, (0x40_1000, at_cap, 0x2000, 0, PF_R | PF_W)],
+        0x40_0000,
+    );
+    assert!(
+        parsed(&ok).is_ok(),
+        "an image of exactly the cap is accepted"
+    );
+    let over = elf(
+        &[text, (0x40_1000, at_cap + 1, 0x2000, 0, PF_R | PF_W)],
+        0x40_0000,
+    );
+    assert_eq!(parsed(&over), Err(ElfError::TooLarge));
+}
+
+/// The load plan of `seg`, as (page, file offset, frame offset, length).
+fn plan(seg: Segment) -> Vec<(u64, u64, u64, u64)> {
+    seg.load_plan()
+        .map(|p| (p.page, p.file_offset, p.frame_offset, p.len))
+        .collect()
+}
+
+fn seg(vaddr: u64, mem_size: u64, offset: u64, file_size: u64) -> Segment {
+    Segment {
+        vaddr,
+        mem_size,
+        offset,
+        file_size,
+        writable: true,
+        executable: false,
+    }
+}
+
+#[test]
+fn load_plan_of_a_segment_starting_mid_page() {
+    assert_eq!(
+        plan(seg(0x40_0800, 0x100, 0x2800, 0x100)),
+        [(0x40_0000, 0x2800, 0x800, 0x100)]
+    );
+}
+
+#[test]
+fn load_plan_of_file_bytes_straddling_a_page() {
+    assert_eq!(
+        plan(seg(0x40_0ff0, 0x20, 0x1ff0, 0x20)),
+        [
+            (0x40_0000, 0x1ff0, 0xff0, 0x10),
+            (0x40_1000, 0x2000, 0, 0x10)
+        ]
+    );
+}
+
+#[test]
+fn load_plan_of_file_bytes_then_bss() {
+    // A page of file bytes, a page that holds both, and a bss-only page.
+    assert_eq!(
+        plan(seg(0x40_3000, 0x3000, 0x4000, 0x1100)),
+        [
+            (0x40_3000, 0x4000, 0, 0x1000),
+            (0x40_4000, 0x5000, 0, 0x100),
+            (0x40_5000, 0, 0, 0),
+        ]
+    );
+}

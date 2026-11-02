@@ -279,17 +279,20 @@ impl AddressSpace {
     }
 
     /// Remove the mapping for `virt`, if present. Returns whether an entry was
-    /// cleared. Does not reclaim now-empty intermediate tables (see ADR 0011).
+    /// cleared. Each intermediate table the removal leaves empty is freed and
+    /// unlinked, from the page table up (#64), except the root and the
+    /// kernel half's PDPTs, whose top-level entries every user space shares.
     pub fn unmap(&mut self, virt: u64) -> bool {
         let idx = table_indices(virt);
-        let mut table = self.root.addr();
-        for &i in &idx[..3] {
-            match self.next_table(table, i) {
-                Some(next) => table = next,
+        // tables[l] is the table at level l: PML4, PDPT, PD, PT.
+        let mut tables = [self.root.addr(); 4];
+        for l in 0..3 {
+            match self.next_table(tables[l], idx[l]) {
+                Some(next) => tables[l + 1] = next,
                 None => return false,
             }
         }
-        let leaf = self.entry_ptr(table, idx[3]);
+        let leaf = self.entry_ptr(tables[3], idx[3]);
         // SAFETY: `leaf` is an in-bounds entry of a present table reached via
         // the HHDM.
         let entry = PageTableEntry::from_bits(unsafe { leaf.read_volatile() });
@@ -298,6 +301,17 @@ impl AddressSpace {
         }
         // SAFETY: as above; clearing the entry removes the mapping.
         unsafe { leaf.write_volatile(0) }
+        for l in (1..4).rev() {
+            let shared = l == 1 && idx[0] >= HIGHER_HALF_START;
+            if shared || (0..ENTRY_COUNT).any(|i| self.entry(tables[l], i).is_present()) {
+                break;
+            }
+            // SAFETY: in-bounds entry of the present parent table; clearing it
+            // unlinks the now-empty table at level `l` before it is freed.
+            unsafe { self.entry_ptr(tables[l - 1], idx[l - 1]).write_volatile(0) }
+            frame::free_frame(PhysFrame::containing(tables[l]));
+        }
+        // Also drops any paging-structure cache entries for the freed tables.
         invlpg(virt);
         true
     }

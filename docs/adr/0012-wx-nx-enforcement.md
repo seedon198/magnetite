@@ -73,4 +73,4 @@ issue so this one stays small and low-risk.
 - A *negative* test (actually faulting on an NX/W^X violation) depends on the
   page-fault handler not halting; it arrives with #42 (page-fault diagnostics).
   Until then, verification is by flag inspection.
-- `unmap`/`protect` still do not reclaim intermediate tables (ADR 0011).
+- `unmap` reclaims the intermediate tables it empties (ADR 0011, #64).

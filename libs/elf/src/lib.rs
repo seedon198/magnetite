@@ -19,6 +19,11 @@ mod tests;
 /// Most loadable segments an image may have.
 pub const MAX_SEGMENTS: usize = 8;
 
+/// Most pages an image's segments may cover in total (16 MiB): far more than
+/// any boot program needs, and small enough that a hostile image cannot drain
+/// the frame allocator before the loader refuses it (#132).
+pub const MAX_IMAGE_PAGES: u64 = 4096;
+
 const PAGE: u64 = 4096;
 const EHDR_SIZE: usize = 64;
 const PHDR_SIZE: usize = 56;
@@ -43,6 +48,50 @@ pub struct Segment {
     pub writable: bool,
     /// Mapped executable.
     pub executable: bool,
+}
+
+/// One page of a segment to load: map a zeroed frame at `page`, then copy
+/// `len` bytes from `file_offset` in the file to `frame_offset` in the frame.
+/// A page holding only bss has `len == 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageLoad {
+    /// The page-aligned address to map.
+    pub page: u64,
+    /// Where the bytes start in the file.
+    pub file_offset: u64,
+    /// Where they go in the frame.
+    pub frame_offset: u64,
+    /// How many file bytes the page holds.
+    pub len: u64,
+}
+
+impl Segment {
+    /// Every page the segment covers, in order, with the file bytes each one
+    /// holds. Pure arithmetic, so segments that start mid-page or mix file
+    /// bytes and bss in one page are host-tested (#133). Meaningful for a
+    /// segment [`parse`] accepted, whose sums cannot overflow.
+    pub fn load_plan(&self) -> impl Iterator<Item = PageLoad> + '_ {
+        let (first, end) = pages(self);
+        let file_end = self.vaddr + self.file_size;
+        (first..end).step_by(PAGE as usize).map(move |page| {
+            let (from, to) = (page.max(self.vaddr), (page + PAGE).min(file_end));
+            if from < to {
+                PageLoad {
+                    page,
+                    file_offset: self.offset + (from - self.vaddr),
+                    frame_offset: from - page,
+                    len: to - from,
+                }
+            } else {
+                PageLoad {
+                    page,
+                    file_offset: 0,
+                    frame_offset: 0,
+                    len: 0,
+                }
+            }
+        })
+    }
 }
 
 /// A validated executable: its entry point and loadable segments.
@@ -99,6 +148,8 @@ pub enum ElfError {
     WriteAndExecute,
     /// The entry point is not inside an executable segment.
     BadEntry,
+    /// The segments cover more than [`MAX_IMAGE_PAGES`] pages in total.
+    TooLarge,
 }
 
 fn bytes<const N: usize>(b: &[u8], at: usize) -> Result<[u8; N], ElfError> {
@@ -204,6 +255,16 @@ pub fn parse(bytes: &[u8], user_limit: u64) -> Result<Image, ElfError> {
     }
 
     let segs = image.segments();
+    let total: u64 = segs
+        .iter()
+        .map(|s| {
+            let (first, end) = pages(s);
+            (end - first) / PAGE
+        })
+        .sum();
+    if total > MAX_IMAGE_PAGES {
+        return Err(ElfError::TooLarge);
+    }
     for (i, a) in segs.iter().enumerate() {
         let (a0, a1) = pages(a);
         for b in &segs[i + 1..] {

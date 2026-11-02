@@ -100,22 +100,19 @@ fn map_image(space: &mut AddressSpace, elf: &elf::Image, image: &[u8]) -> Result
         if !seg.executable {
             flags |= Flags::NO_EXECUTE;
         }
-        // Validated: the segment lies inside the file and below ELF_LIMIT.
-        let file_end = seg.vaddr + seg.file_size;
-        let mut page = seg.vaddr & !(PAGE - 1);
-        while page < seg.vaddr + seg.mem_size {
+        // Validated: the segment lies inside the file and below ELF_LIMIT,
+        // and the plan's arithmetic is host-tested in `elf` (#133).
+        for load in seg.load_plan() {
             let frame = hal::frame::alloc_frame().ok_or(LoadError::OutOfMemory)?;
-            let (from, to) = (page.max(seg.vaddr), (page + PAGE).min(file_end));
-            if from < to {
-                let off = (seg.offset + (from - seg.vaddr)) as usize;
-                let bytes = &image[off..off + (to - from) as usize];
-                hal::object::write_phys(frame.addr() + (from - page), hhdm, bytes);
+            if load.len > 0 {
+                let off = load.file_offset as usize;
+                let bytes = &image[off..off + load.len as usize];
+                hal::object::write_phys(frame.addr() + load.frame_offset, hhdm, bytes);
             }
-            if space.map(page, frame.addr(), flags).is_err() {
+            if space.map(load.page, frame.addr(), flags).is_err() {
                 hal::frame::free_frame(frame);
                 return Err(LoadError::Map);
             }
-            page += PAGE;
         }
     }
     for i in 1..=STACK_PAGES {
