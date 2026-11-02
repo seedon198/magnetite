@@ -243,6 +243,14 @@ All notable changes are documented here. The format follows
   ANSI escape can no longer overwrite the `console[N]:` prefix and forge a
   kernel line; and line buffers track ownership with an `in_use` flag rather
   than treating badge 0 as free. A boot self-check covers both.
+- Scheduling (#107, #130, #136): ADR 0018 now states that the boot thread is
+  the idle thread (it never blocks or exits, and idles in `hlt`), and
+  blocking asserts it. `alloc_kernel_stack` refuses an occupied slot up front
+  and undoes its own partial allocation, so a failed `spawn` can never free
+  another thread's live stack; a boot check allocates over thread 7's slot.
+  Boot-time waits for tasks go through `thread::wait_exit`, which gives up
+  after a yield budget and panics naming the task and whether it was
+  blocked, instead of hanging until CI's timeout.
 
 ## [0.3.0] - 2026-10-28
 
