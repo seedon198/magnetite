@@ -213,26 +213,59 @@ pub fn bootstrap_root(
     crate::ipc::set_cspace(t, own, space);
     if let Err(e) = spawn(t, ROOT_STACK_SLOT, image) {
         crate::ipc::take_cspace(t);
-        free_bootstrap(boot);
+        if reclaim_memory(boot).is_err() {
+            crate::warn!("task: a refused root task's memory is still named; kept");
+        }
         return Err(e);
     }
     Ok(boot)
 }
 
+/// Memory behind an exited task's capabilities that something still names, so
+/// it was not freed: the capability that holds it, and the memory to retry.
+pub struct Unreclaimed {
+    /// The thread and slot of a capability into the task's memory.
+    pub holder: (ThreadId, CapId),
+    /// The task's memory, still allocated.
+    pub boot: Bootstrap,
+}
+
 /// Reclaim the exited root task: its address space and kernel stack, its
 /// capability space, and the memory behind its capabilities. Returns the
 /// frames freed.
-pub fn reap_root(t: ThreadId, boot: Bootstrap) -> usize {
+///
+/// # Errors
+/// [`Unreclaimed`] if a capability elsewhere still names the task's memory:
+/// there is no revoke yet (#105), so freeing it would let that capability
+/// reach whatever reuses the frames. The thread and capability space are
+/// reclaimed either way; retry the memory with [`reclaim_memory`].
+pub fn reap_root(t: ThreadId, boot: Bootstrap) -> Result<usize, Unreclaimed> {
     let freed = thread::reap(t);
     crate::ipc::take_cspace(t);
-    freed + free_bootstrap(boot)
+    reclaim_memory(boot).map(|n| n + freed)
 }
 
-fn free_bootstrap(boot: Bootstrap) -> usize {
+/// Free a task's CNode, Untyped control block and Untyped region, unless a
+/// capability in any capability space still names an object inside them.
+///
+/// # Errors
+/// [`Unreclaimed`], with the memory untouched, if one does.
+pub fn reclaim_memory(boot: Bootstrap) -> Result<usize, Unreclaimed> {
+    let untyped = boot.untyped.addr();
+    let regions = [
+        (boot.cnode.addr(), boot.cnode.addr() + PAGE),
+        (boot.control.addr(), boot.control.addr() + PAGE),
+        (untyped, untyped + ROOT_UNTYPED_FRAMES as u64 * PAGE),
+    ];
+    for (start, end) in regions {
+        if let Some(holder) = crate::ipc::find_reference(start, end) {
+            return Err(Unreclaimed { holder, boot });
+        }
+    }
     hal::frame::free_frame(boot.cnode);
     hal::frame::free_frame(boot.control);
     hal::frame::free_contiguous(boot.untyped, ROOT_UNTYPED_FRAMES);
-    2 + ROOT_UNTYPED_FRAMES
+    Ok(2 + ROOT_UNTYPED_FRAMES)
 }
 
 /// Frames currently free.
@@ -320,7 +353,24 @@ fn root_demo(console: ObjectRef, root: &[u8]) {
         Some(true),
         "task: slot 4 does not hold the Notification root signalled"
     );
-    reap_root(ROOT, boot);
+    // A capability that outlives the task must keep its memory alive (#105):
+    // plant one into root's Untyped region in the console server's space, as
+    // a GRANT would, and the memory must stay allocated until it is gone.
+    let planted = ObjectRef::new(ObjectKind::Endpoint, boot.untyped.addr() + 2 * PAGE);
+    let slot = crate::ipc::with_cspace(CONSOLE, |cs, _| {
+        cs.insert(Capability::new(planted, Rights::SEND))
+    })
+    .flatten()
+    .expect("task: the console server has a free slot");
+    let Err(kept) = reap_root(ROOT, boot) else {
+        panic!("task: freed memory that a capability still names");
+    };
+    assert_eq!(kept.holder, (CONSOLE, slot), "task: wrong holder reported");
+    crate::ipc::with_cspace(CONSOLE, |cs, _| cs.delete(slot)).map(|r| r.expect("planted"));
+    if reclaim_memory(kept.boot).is_err() {
+        panic!("task: memory still held after its last capability went");
+    }
+    crate::info!("task: memory a capability still names is kept until the capability goes");
     assert_eq!(free_frames(), before, "task: the root task leaked frames");
     crate::info!(
         "task: root task confined to 4 capabilities; console via IPC; all memory reclaimed"

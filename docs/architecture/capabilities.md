@@ -53,7 +53,14 @@ budget and cannot exhaust kernel memory.
 - `Untyped { base, size, watermark }` is a bump allocator over a physical
   region; `allocate(size, align, count)` carves naturally-aligned storage
   (checked for alignment, overflow, and exhaustion). Reclamation is
-  whole-region only (revoke), as in seL4.
+  whole-region only. There is **no revoke yet** (#105): when a task is
+  reaped, the kernel scans every capability space and frees the task's
+  CNode, Untyped control block and Untyped region only if no capability
+  anywhere still names an object inside them (`ipc::find_reference`);
+  otherwise the memory stays allocated and the holder is reported. A
+  seL4-style capability derivation tree, with revoke that also fails
+  threads blocked on a revoked endpoint, is planned before the first `GRANT`
+  path between tasks.
 - `hal::object::retype` carves from an Untyped and **zeroes** the storage
   through the HHDM, so a retyped object never exposes prior contents.
 - An Untyped capability points at a small `repr(C)` control block holding its

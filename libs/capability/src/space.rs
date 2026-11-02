@@ -75,6 +75,17 @@ impl<'a, Obj: Copy> CapSpace<'a, Obj> {
         }
     }
 
+    /// Every occupied slot and the capability it holds, in slot order.
+    pub fn iter(&self) -> impl Iterator<Item = (CapId, Capability<Obj>)> + '_
+    where
+        Obj: Copy,
+    {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.cap.map(|c| (CapId(i as u32), c)))
+    }
+
     /// The capability at `id`, or an error if the slot is out of range or empty.
     pub fn get(&self, id: CapId) -> Result<Capability<Obj>, CapError> {
         let i = self.index(id)?;
@@ -160,6 +171,41 @@ impl<'a, Obj: Copy> CapSpace<'a, Obj> {
 mod tests {
     use super::*;
     use crate::Rights;
+
+    #[test]
+    fn iter_yields_only_occupied_slots_in_order() {
+        let mut slots = [Slot::empty(); 4];
+        let mut space = CapSpace::new(&mut slots);
+        space
+            .insert_at(CapId(3), Capability::new(30u32, Rights::READ))
+            .unwrap();
+        space
+            .insert_at(CapId(1), Capability::new(10u32, Rights::READ))
+            .unwrap();
+        let seen: alloc_free::Pairs = space.iter().map(|(id, c)| (id.0, c.object)).collect();
+        assert_eq!(seen.as_slice(), &[(1, 10), (3, 30)]);
+    }
+
+    /// A tiny fixed-capacity collector, since the crate is `no_std`.
+    mod alloc_free {
+        #[derive(Default)]
+        pub struct Pairs([(u32, u32); 8], usize);
+        impl Pairs {
+            pub fn as_slice(&self) -> &[(u32, u32)] {
+                &self.0[..self.1]
+            }
+        }
+        impl FromIterator<(u32, u32)> for Pairs {
+            fn from_iter<I: IntoIterator<Item = (u32, u32)>>(it: I) -> Self {
+                let mut p = Self::default();
+                for x in it {
+                    p.0[p.1] = x;
+                    p.1 += 1;
+                }
+                p
+            }
+        }
+    }
 
     fn space(slots: &mut [Slot<u64>]) -> CapSpace<'_, u64> {
         CapSpace::new(slots)

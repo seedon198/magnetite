@@ -69,6 +69,27 @@ pub fn with_cspace<R>(
 }
 
 /// Take thread `t`'s capability space away (when reaping it).
+/// The first capability, in any thread's capability space, that names an
+/// object stored in physical `[start, end)`, as `(thread, slot)`. A CNode
+/// backing a capability space counts too, as slot 0. Memory may be freed only
+/// while this is `None` (#105).
+pub fn find_reference(start: u64, end: u64) -> Option<(ThreadId, CapId)> {
+    let inside = |o: ObjectRef| (start..end).contains(&o.phys);
+    hal::cpu::without_interrupts(|| {
+        let spaces = CSPACES.lock();
+        spaces.iter().enumerate().find_map(|(i, entry)| {
+            let (cnode, space) = entry.as_ref()?;
+            if inside(*cnode) {
+                return Some((ThreadId(i), CapId(0)));
+            }
+            space
+                .iter()
+                .find(|(_, c)| inside(c.object))
+                .map(|(id, _)| (ThreadId(i), id))
+        })
+    })
+}
+
 pub fn take_cspace(t: ThreadId) -> Option<(ObjectRef, CapSpace<'static, ObjectRef>)> {
     hal::cpu::without_interrupts(|| CSPACES.lock()[t.0].take())
 }
