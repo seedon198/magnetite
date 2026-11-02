@@ -27,28 +27,37 @@ use limine::request::{
 };
 use limine::BaseRevision;
 
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `_start`'s [`BootInfo`], for [`info`] once `kmain` has left the bootloader's
-/// stack (#66).
-static BOOT_INFO: AtomicPtr<BootInfo> = AtomicPtr::new(core::ptr::null_mut());
+/// The boot handoff, in the kernel image rather than on the bootloader's
+/// stack, which lives in memory the kernel reclaims (#65). `_start` fills it
+/// once, before anything reads it.
+struct BootCell(UnsafeCell<BootInfo>);
+
+// SAFETY: written only by `_start`, on the one CPU, before `kmain` runs and
+// before any other context exists; only read afterwards.
+unsafe impl Sync for BootCell {}
+
+static BOOT_INFO: BootCell = BootCell(UnsafeCell::new(BootInfo::new()));
+
+/// Set once `_start` has filled [`BOOT_INFO`].
+static BOOT_INFO_READY: AtomicBool = AtomicBool::new(false);
 
 /// The boot handoff `_start` assembled.
 ///
 /// # Panics
-/// If called before `_start` has recorded it.
+/// If called before `_start` has filled it.
 #[must_use]
 pub fn info() -> &'static BootInfo {
-    let p = BOOT_INFO.load(Ordering::Acquire);
     assert!(
-        !p.is_null(),
-        "boot: BootInfo used before _start recorded it"
+        BOOT_INFO_READY.load(Ordering::Acquire),
+        "boot: BootInfo used before _start filled it"
     );
-    // SAFETY: `p` points at `_start`'s `boot_info` local. `_start` never
-    // returns (it ends in `kmain`, which is `-> !`), so that stack frame lives
-    // as long as the kernel; the bootloader's stack stays mapped (in the HHDM)
-    // and is never reclaimed. The value is not mutated after it is recorded.
-    unsafe { &*p }
+    // SAFETY: `_start` finished writing `BOOT_INFO` before setting the flag
+    // (Release/Acquire), and nothing writes it again, so a shared reference
+    // for the rest of the kernel's life is sound.
+    unsafe { &*BOOT_INFO.0.get() }
 }
 
 /// The base revision of the Limine protocol this kernel is built against. The
@@ -123,7 +132,9 @@ pub extern "C" fn _start() -> ! {
         hal::cpu::halt_loop();
     }
 
-    let mut boot_info = BootInfo::new();
+    // SAFETY: this is the only writer of `BOOT_INFO`, running once, alone,
+    // before anything reads it (see `BootCell`).
+    let boot_info = unsafe { &mut *BOOT_INFO.0.get() };
 
     if let Some(hhdm) = HHDM.get_response() {
         boot_info.hhdm_offset = hhdm.offset();
@@ -181,7 +192,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    BOOT_INFO.store(&raw mut boot_info, Ordering::Release);
+    BOOT_INFO_READY.store(true, Ordering::Release);
     crate::kmain(info())
 }
 
