@@ -195,6 +195,15 @@ All notable changes are documented here. The format follows
   `AddressSpace::split_huge`) and makes the alias of every code and read-only
   page read-only and NX (`AddressSpace::make_read_only`, which keeps cache
   and global bits). The boot verification checks every alias page.
+- `reap_root` freed the root task's capability-backed memory with no revoke
+  and no check that anything else still named it (#105). Safe today only
+  because no capability with `GRANT` leaves a task; once one did, a stale
+  capability would reach whatever reused the frames. Reclaim now scans every
+  capability space (`ipc::find_reference`, using a new `CapSpace::iter`)
+  and keeps the memory, reporting the holder, while any capability names an
+  object inside it. A boot check plants such a capability and verifies the
+  memory is kept, then freed once it is deleted. Revoke itself is still to
+  come.
 
 ### Fixed
 
