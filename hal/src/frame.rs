@@ -103,8 +103,8 @@ pub fn free_contiguous(base: PhysFrame, count: usize) {
 /// Return a frame to the pool.
 ///
 /// # Panics
-/// On a double free or a free of an untracked frame - both are kernel bugs
-/// (see [`FreeError`]).
+/// On a double free, or a free of a frame outside the pool (untracked,
+/// reserved, or never usable): all are kernel bugs (see [`FreeError`]).
 pub fn free_frame(frame: PhysFrame) {
     match ALLOCATOR.lock().as_mut() {
         Some(alloc) => {

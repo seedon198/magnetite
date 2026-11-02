@@ -69,6 +69,10 @@ pub enum FreeError {
     OutOfRange,
     /// The frame was already free - a double free.
     AlreadyFree,
+    /// The frame was never in the pool: frame 0, the bitmap's own storage, a
+    /// reserved range, or a hole such as MMIO. Freeing it would let the
+    /// allocator hand out memory it does not own (#122).
+    NotPoolFrame,
 }
 
 /// Number of `u64` words a bitmap needs to track `frames` frames.
@@ -84,7 +88,8 @@ pub struct Layout {
     /// Number of frames the bitmap tracks: index `0` up to the highest frame in
     /// any usable region.
     pub frames: usize,
-    /// Number of `u64` words the bitmap occupies.
+    /// Number of `u64` words the bitmap occupies: two bitmaps of
+    /// `words_for(frames)` each, the used bits and then the pool bits.
     pub words: usize,
     /// Physical base address chosen to store the bitmap.
     pub bitmap_base: u64,
@@ -111,7 +116,7 @@ pub fn plan(regions: &[Region]) -> Option<Layout> {
         return None;
     }
     let frames = (highest_end / FRAME_SIZE) as usize;
-    let words = words_for(frames);
+    let words = 2 * words_for(frames);
     let bitmap_bytes = (words as u64) * 8;
     for r in regions {
         if r.usable && r.length >= bitmap_bytes {
@@ -128,8 +133,11 @@ pub fn plan(regions: &[Region]) -> Option<Layout> {
 
 /// A bitmap physical-frame allocator over a caller-provided bitmap slice.
 pub struct FrameAllocator<'a> {
-    /// One bit per frame, `1` = used. Length must be `>= words_for(frames)`.
+    /// One bit per frame, `1` = used.
     bitmap: &'a mut [u64],
+    /// One bit per frame, `1` = in the pool (usable and not reserved): the
+    /// only frames [`free`](Self::free) accepts. Fixed after construction.
+    pool: &'a mut [u64],
     frames: usize,
     /// Next-free search hint (a frame index); `alloc` starts scanning here.
     hint: usize,
@@ -141,7 +149,9 @@ pub struct FrameAllocator<'a> {
 }
 
 impl<'a> FrameAllocator<'a> {
-    /// Build an allocator over `bitmap`, tracking `frames` frames.
+    /// Build an allocator over `bitmap`, tracking `frames` frames. `bitmap`
+    /// holds two bitmaps of `words_for(frames)` words each (as [`plan`] sizes
+    /// it): the used bits, then the pool bits.
     ///
     /// Every frame starts **used**; frames fully inside a `usable` region are
     /// then freed; finally every `(base, len)` range in `reserved` is marked
@@ -158,15 +168,18 @@ impl<'a> FrameAllocator<'a> {
         regions: &[Region],
         reserved: &[(u64, u64)],
     ) -> Self {
+        let words = words_for(frames);
         assert!(
-            bitmap.len() >= words_for(frames),
-            "bitmap too small for frame count"
+            bitmap.len() >= 2 * words,
+            "bitmap too small for frame count (it holds the used and pool bits)"
         );
-        for w in bitmap.iter_mut() {
-            *w = u64::MAX;
-        }
+        let (bitmap, rest) = bitmap.split_at_mut(words);
+        let pool = &mut rest[..words];
+        bitmap.fill(u64::MAX);
+        pool.fill(0);
         let mut a = Self {
             bitmap,
+            pool,
             frames,
             hint: 0,
             free: 0,
@@ -181,6 +194,12 @@ impl<'a> FrameAllocator<'a> {
         a.usable = a.free;
         for &(base, len) in reserved {
             a.reserve_region(base, len);
+        }
+        // The pool: frames free now, which excludes the reserved ranges.
+        for i in 0..frames {
+            if !a.is_used(i) {
+                a.pool[i / 64] |= 1 << (i % 64);
+            }
         }
         a.hint = 0;
         a
@@ -227,12 +246,16 @@ impl<'a> FrameAllocator<'a> {
     /// Return a previously-allocated frame to the pool.
     ///
     /// # Errors
-    /// [`FreeError::OutOfRange`] if the frame is not tracked, or
-    /// [`FreeError::AlreadyFree`] on a double free. Both indicate a kernel bug.
+    /// [`FreeError::OutOfRange`] if the frame is not tracked,
+    /// [`FreeError::NotPoolFrame`] if it was never in the pool, or
+    /// [`FreeError::AlreadyFree`] on a double free. All indicate a kernel bug.
     pub fn free(&mut self, frame: PhysFrame) -> Result<(), FreeError> {
         let i = frame.index();
         if i >= self.frames {
             return Err(FreeError::OutOfRange);
+        }
+        if self.pool[i / 64] & (1 << (i % 64)) == 0 {
+            return Err(FreeError::NotPoolFrame);
         }
         if !self.is_used(i) {
             return Err(FreeError::AlreadyFree);
@@ -369,9 +392,43 @@ mod tests {
         ];
         let layout = plan(&regions).unwrap();
         assert_eq!(layout.frames, (4 * MIB / FRAME_SIZE) as usize); // 1024 frames
-        assert_eq!(layout.words, 16); // 1024 / 64
+        assert_eq!(layout.words, 32); // 1024 / 64, twice: used bits and pool bits
         assert_eq!(layout.bitmap_base, 0); // first usable region
-        assert_eq!(layout.bitmap_bytes, 128);
+        assert_eq!(layout.bitmap_bytes, 256);
+    }
+
+    #[test]
+    fn free_rejects_frames_outside_the_pool() {
+        // Frames 0..8 usable, 8..16 a hole; frame 1 reserved (e.g. the bitmap).
+        let mut bitmap = [0u64; 2];
+        let regions = [
+            usable(0, 8 * FRAME_SIZE),
+            Region {
+                base: 8 * FRAME_SIZE,
+                length: 8 * FRAME_SIZE,
+                usable: false,
+            },
+            usable(16 * FRAME_SIZE, 16 * FRAME_SIZE),
+        ];
+        let mut a = FrameAllocator::new(&mut bitmap, 32, &regions, &[(FRAME_SIZE, FRAME_SIZE)]);
+        let free = a.free_frames();
+        let reserved = PhysFrame::from_index(1);
+        let hole = PhysFrame::from_index(9);
+        assert_eq!(a.free(reserved), Err(FreeError::NotPoolFrame));
+        assert_eq!(a.free(hole), Err(FreeError::NotPoolFrame));
+        assert_eq!(a.free_frames(), free, "a rejected free changed nothing");
+        // A frame from the pool still round-trips.
+        let f = a.alloc().unwrap();
+        assert_eq!(a.free(f), Ok(()));
+        assert_eq!(a.free(f), Err(FreeError::AlreadyFree));
+    }
+
+    #[test]
+    #[should_panic(expected = "bitmap too small")]
+    fn new_needs_room_for_both_bitmaps() {
+        let mut bitmap = [0u64; 1]; // one word: the used bits only
+        let regions = [usable(0, 64 * FRAME_SIZE)];
+        let _ = FrameAllocator::new(&mut bitmap, 64, &regions, &[]);
     }
 
     #[test]
@@ -387,7 +444,7 @@ mod tests {
     #[test]
     fn new_accounts_usable_and_reserved() {
         // 1024 frames; all usable; reserve the first 2 frames (e.g. a bitmap).
-        let mut bitmap = [0u64; 16];
+        let mut bitmap = [0u64; 32];
         let regions = [usable(0, 4 * MIB)];
         let a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[(0, 2 * FRAME_SIZE)]);
         assert_eq!(a.total_frames(), 1024);
@@ -399,7 +456,7 @@ mod tests {
     #[test]
     fn non_usable_frames_are_never_handed_out() {
         // Two 64 KiB usable windows with a gap; everything else used.
-        let mut bitmap = [0u64; 16];
+        let mut bitmap = [0u64; 32];
         let regions = [usable(0, 64 * 1024), usable(512 * 1024, 64 * 1024)];
         let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
         // 32 frames total usable (16 + 16).
@@ -415,7 +472,7 @@ mod tests {
 
     #[test]
     fn alloc_free_roundtrip_and_reuse() {
-        let mut bitmap = [0u64; 16];
+        let mut bitmap = [0u64; 32];
         let regions = [usable(0, 4 * MIB)];
         let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
         let first = a.alloc().unwrap();
@@ -430,7 +487,7 @@ mod tests {
 
     #[test]
     fn double_free_and_out_of_range_are_rejected() {
-        let mut bitmap = [0u64; 16];
+        let mut bitmap = [0u64; 32];
         let regions = [usable(0, 4 * MIB)];
         let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
         let f = a.alloc().unwrap();
@@ -444,7 +501,7 @@ mod tests {
 
     #[test]
     fn exhaustion_reports_none() {
-        let mut bitmap = [0u64; 1];
+        let mut bitmap = [0u64; 2];
         let regions = [usable(0, 8 * FRAME_SIZE)]; // 8 frames
         let mut a = FrameAllocator::new(&mut bitmap, 8, &regions, &[]);
         for _ in 0..8 {
@@ -458,7 +515,7 @@ mod tests {
     fn partial_frames_are_not_freed() {
         // A usable region misaligned by half a frame on each end yields only
         // the whole frames strictly inside it.
-        let mut bitmap = [0u64; 1];
+        let mut bitmap = [0u64; 2];
         let regions = [usable(FRAME_SIZE / 2, 3 * FRAME_SIZE)];
         let a = FrameAllocator::new(&mut bitmap, 8, &regions, &[]);
         // [2048, 14336) contains whole frames 1 and 2 only.
@@ -467,7 +524,7 @@ mod tests {
 
     #[test]
     fn contiguous_run_is_aligned_and_marked() {
-        let mut bitmap = [0u64; 16];
+        let mut bitmap = [0u64; 32];
         let regions = [usable(0, 4 * MIB)];
         let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
         a.alloc().unwrap(); // frame 0 taken: the run cannot start there
@@ -485,7 +542,7 @@ mod tests {
 
     #[test]
     fn contiguous_skips_fragmented_runs() {
-        let mut bitmap = [0u64; 1];
+        let mut bitmap = [0u64; 2];
         let regions = [usable(0, 64 * 4096)];
         let mut a = FrameAllocator::new(&mut bitmap, 64, &regions, &[]);
         // Take one frame in each of the first three aligned runs of 16.
@@ -505,7 +562,7 @@ mod tests {
 
     #[test]
     fn contiguous_none_when_no_run() {
-        let mut bitmap = [0u64; 1];
+        let mut bitmap = [0u64; 2];
         let regions = [usable(0, 32 * 4096)];
         let mut a = FrameAllocator::new(&mut bitmap, 32, &regions, &[]);
         let _ = a.alloc(); // frame 0
@@ -518,7 +575,7 @@ mod tests {
 
     #[test]
     fn non_power_of_two_is_refused() {
-        let mut bitmap = [0u64; 16];
+        let mut bitmap = [0u64; 32];
         let regions = [usable(0, 4 * MIB)];
         let mut a = FrameAllocator::new(&mut bitmap, 1024, &regions, &[]);
         assert!(a.alloc_contiguous(3).is_none());

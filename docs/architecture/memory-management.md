@@ -22,8 +22,11 @@ map ([ADR 0010](../adr/0010-bitmap-frame-allocator.md)).
   lives in the pure, `forbid(unsafe)`, host-tested `frame-alloc` crate.
 - `hal::frame` backs the bitmap with real RAM through the HHDM and **zeroes every
   frame on allocation**, so a new owner never reads a previous owner's data.
-- Frame 0 and the bitmap's own storage are reserved; a double-free or a free of
-  an untracked frame is treated as a kernel bug.
+- Frame 0 and the bitmap's own storage are reserved. A second bitmap records
+  the **pool** (usable RAM minus reserved ranges), and `free` accepts only pool
+  frames: a double free, or a free of frame 0, the bitmap, a reserved range or
+  a hole such as MMIO (`FreeError::NotPoolFrame`, #122), is treated as a
+  kernel bug instead of quietly adding the frame to the pool.
 - Single-frame allocation only; large-page / DMA-contiguous allocation is
   deferred until a consumer needs it.
 
