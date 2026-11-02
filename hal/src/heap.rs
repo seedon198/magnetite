@@ -7,6 +7,11 @@
 //! an [`AllocHeader`] stored just before each allocation records the block to
 //! return on `dealloc` (so arbitrary alignments are handled without guesswork).
 //!
+//! Free memory holds no stale data: a block is **zeroed when it is freed**,
+//! and a free-list header swallowed by a merge is zeroed too, so the only
+//! non-zero bytes in free memory are the live list headers, and a later
+//! allocation never sees an earlier one's contents (#69).
+//!
 //! The heap is **growable**: when no block fits, it calls a `grow` hook
 //! (installed by the kernel) that maps fresh frames and hands back a new,
 //! address-contiguous region, which coalesces onto the existing pool.
@@ -51,6 +56,14 @@ const MIN_ALIGN: usize = if NODE_ALIGN > core::mem::align_of::<AllocHeader>() {
 
 const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
+}
+
+/// [`align_up`], or `None` if it would overflow (#121).
+const fn checked_align_up(addr: usize, align: usize) -> Option<usize> {
+    match addr.checked_add(align - 1) {
+        Some(a) => Some(a & !(align - 1)),
+        None => None,
+    }
 }
 
 /// A hook that maps at least `min` more bytes of heap memory and returns the
@@ -126,10 +139,12 @@ impl Heap {
                 // SAFETY: `prev` is live; re-read its grown size.
                 let grown = unsafe { (*prev).size };
                 if !cur.is_null() && prev as usize + grown == cur as usize {
-                    // SAFETY: `prev` now abuts `cur`; splice `cur` out.
+                    // SAFETY: `prev` now abuts `cur`; splice `cur` out, then
+                    // clear its header, which is now interior free memory.
                     unsafe {
                         (*prev).size = grown + (*cur).size;
                         (*prev).next = (*cur).next;
+                        ptr::write_bytes(cur.cast::<u8>(), 0, NODE_SIZE);
                     }
                 }
                 return;
@@ -152,16 +167,19 @@ impl Heap {
         }
         // Merge forward into `cur` if they touch.
         if !cur.is_null() && start + size == cur as usize {
-            // SAFETY: `node` and `cur` are live and adjacent.
+            // SAFETY: `node` and `cur` are live and adjacent; `cur`'s header
+            // becomes interior free memory and is cleared.
             unsafe {
                 (*node).size += (*cur).size;
                 (*node).next = (*cur).next;
+                ptr::write_bytes(cur.cast::<u8>(), 0, NODE_SIZE);
             }
         }
     }
 
     /// First-fit allocation. Returns null if nothing fits (the caller may grow
-    /// and retry).
+    /// and retry). Every address sum is checked: a `Layout` too large for the
+    /// address space finds no block, instead of wrapping to a small one (#121).
     unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let align = layout.align().max(MIN_ALIGN);
         let size = layout.size().max(1);
@@ -172,8 +190,11 @@ impl Heap {
             let cs = cur as usize;
             // SAFETY: `cur` is a live free node.
             let bsz = unsafe { (*cur).size };
-            let user = align_up(cs + HEADER_SIZE, align);
-            let end = user + size;
+            let fits = checked_align_up(cs + HEADER_SIZE, align)
+                .and_then(|user| Some((user, user.checked_add(size)?)));
+            let Some((user, end)) = fits else {
+                return ptr::null_mut(); // larger than any block can be
+            };
             if end <= cs + bsz {
                 let carved_end = align_up(end, NODE_ALIGN).min(cs + bsz);
                 let remainder = cs + bsz - carved_end;
@@ -222,6 +243,10 @@ impl Heap {
         let hdr = unsafe { &*((ptr as usize - HEADER_SIZE) as *const AllocHeader) };
         let (start, size) = (hdr.block_start, hdr.block_size);
         self.allocated -= size;
+        // SAFETY: `[start, start + size)` is the block `alloc` carved, which
+        // the caller is done with; clearing it (header included) leaves no
+        // data behind for the next owner (#69).
+        unsafe { ptr::write_bytes(start as *mut u8, 0, size) };
         self.insert_free(start, size);
     }
 }
@@ -247,6 +272,31 @@ impl KernelHeap {
         let mut h = self.inner.lock();
         h.grow = Some(grow);
         h.grow_now(0)
+    }
+
+    /// Self-test zero-on-free (#69): fill a block, free it, allocate the same
+    /// layout again, and check every byte handed out is zero. Returns whether
+    /// it held.
+    pub fn verify_zero_on_free(&self) -> bool {
+        let layout = Layout::from_size_align(256, 16).expect("heap: self-test layout");
+        // SAFETY: a non-zero-size layout; each pointer is checked for null,
+        // written or read only within its `layout.size()` bytes, and freed
+        // once with the same layout.
+        unsafe {
+            let first = GlobalAlloc::alloc(self, layout);
+            if first.is_null() {
+                return false;
+            }
+            ptr::write_bytes(first, 0xA5, layout.size());
+            GlobalAlloc::dealloc(self, first, layout);
+            let again = GlobalAlloc::alloc(self, layout);
+            if again.is_null() {
+                return false;
+            }
+            let clean = (0..layout.size()).all(|i| again.add(i).read() == 0);
+            GlobalAlloc::dealloc(self, again, layout);
+            clean
+        }
     }
 
     /// Current `(bytes live, bytes mapped)`.
@@ -275,7 +325,14 @@ unsafe impl GlobalAlloc for KernelHeap {
             return p;
         }
         // Out of room: grow by at least the worst-case need, then retry once.
-        let need = layout.size() + layout.align() + HEADER_SIZE + NODE_SIZE;
+        // A need that overflows cannot be met at all (#121).
+        let Some(need) = layout
+            .size()
+            .checked_add(layout.align())
+            .and_then(|n| n.checked_add(HEADER_SIZE + NODE_SIZE))
+        else {
+            return ptr::null_mut();
+        };
         if h.grow_now(need) {
             // SAFETY: as above.
             unsafe { h.alloc(layout) }

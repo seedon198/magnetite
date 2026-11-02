@@ -115,6 +115,12 @@ to `GlobalAlloc`, so `Box` / `Vec` / `String` work in the kernel
   `dealloc` alignment-independent.
 - When no block fits, a kernel-supplied **grow hook** maps more frames (RW+NX)
   contiguously at the next heap address and coalesces them in - no fixed ceiling.
+  If frames run out part-way, the grow undoes the pages it mapped, so the heap
+  can retry rather than wedge (#63).
+- A block is **zeroed when freed**, and a list header absorbed by a merge is
+  cleared, so no allocation sees an earlier one's data (#69).
+- Every size sum is checked: a `Layout` too large to meet gets null, never an
+  overflow panic or a wrapped, too-small block (#121).
 - The heap lives in a dedicated higher-half window
   (`0xffffffff90000000`). *Known limitation:* this window is a fixed base and is
   not yet coordinated with the KASLR slide; making it collision-checked /

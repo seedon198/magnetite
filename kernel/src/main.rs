@@ -541,14 +541,20 @@ fn install_guard_pages() {
 /// Must not itself allocate on the heap (it runs while the heap lock is held);
 /// it only touches the frame allocator and the kernel page tables.
 fn heap_grow(min_bytes: usize) -> Option<(usize, usize)> {
-    let want = (min_bytes as u64).max(HEAP_CHUNK);
+    // A request beyond the whole heap window can never be met; refusing it
+    // first keeps every sum below from overflowing (#121).
+    let min_bytes = u64::try_from(min_bytes).ok()?;
+    if min_bytes > HEAP_LIMIT - HEAP_BASE {
+        return None;
+    }
+    let want = min_bytes.max(HEAP_CHUNK);
     let pages = want.div_ceil(hal::paging::PAGE);
     let size = pages * hal::paging::PAGE;
     let base = HEAP_NEXT.load(Ordering::Relaxed);
 
     // Never grow into the kernel/KASLR window (#61): the heap stays strictly
     // below it, so it can never overlap the slid kernel image.
-    if base + size > HEAP_LIMIT {
+    if base.checked_add(size)? > HEAP_LIMIT {
         return None;
     }
 
@@ -556,10 +562,25 @@ fn heap_grow(min_bytes: usize) -> Option<(usize, usize)> {
     let aspace = guard.as_mut()?;
     let flags = Flags::WRITABLE | Flags::NO_EXECUTE;
     for i in 0..pages {
-        let frame = hal::frame::alloc_frame()?;
-        aspace
-            .map(base + i * hal::paging::PAGE, frame.addr(), flags)
-            .ok()?;
+        let va = base + i * hal::paging::PAGE;
+        let mapped = hal::frame::alloc_frame().is_some_and(|frame| {
+            let ok = aspace.map(va, frame.addr(), flags).is_ok();
+            if !ok {
+                hal::frame::free_frame(frame);
+            }
+            ok
+        });
+        if !mapped {
+            // Out of frames part-way: undo this call's pages, so nothing is
+            // orphaned and the next grow can retry the same base (#63).
+            for done in (0..i).map(|p| base + p * hal::paging::PAGE) {
+                if let Some(phys) = aspace.translate(done) {
+                    aspace.unmap(done);
+                    hal::frame::free_frame(hal::frame::PhysFrame::containing(phys));
+                }
+            }
+            return None;
+        }
     }
     HEAP_NEXT.store(base + size, Ordering::Relaxed);
     Some((base as usize, size as usize))
@@ -585,6 +606,15 @@ fn init_heap() {
     let ok = sum == expected && *boxed == 0xC0FFEE;
     drop(v);
     drop(boxed);
+
+    // A request too large to meet is refused with null, never an overflow
+    // panic or a wrapped size (#121); freed memory comes back zeroed (#69).
+    let huge = Vec::<u8>::new().try_reserve(isize::MAX as usize / 2);
+    assert!(huge.is_err(), "heap: a huge request did not fail cleanly");
+    assert!(
+        HEAP.verify_zero_on_free(),
+        "heap: a freed block was handed out with its old contents"
+    );
 
     let (live, mapped) = HEAP.stats();
     if ok {

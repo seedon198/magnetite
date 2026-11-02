@@ -259,6 +259,14 @@ All notable changes are documented here. The format follows
   4 KiB; `free_subtree` accepts a PAT leaf. The two `init_paging` self-test
   spaces are now destroyed (they leaked five frames per boot), the boot
   asserts the frame count around them, and `AddressSpace` is `#[must_use]`.
+- Kernel heap (#63, #69, #121): every size and address sum in `Heap::alloc`,
+  the `GlobalAlloc` growth request and `heap_grow` is checked, so a huge
+  `Layout` gets null instead of an overflow panic (dev) or a wrapped,
+  too-small block (release). Blocks are zeroed when freed, and list headers
+  absorbed by a merge are cleared, so freed memory keeps no stale kernel
+  data. `heap_grow` undoes a partial growth when frames run out, instead of
+  orphaning the pages and wedging later growth. The heap self-test checks
+  the first two.
 
 ## [0.3.0] - 2026-10-28
 
