@@ -1,6 +1,19 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/banner-dark.svg">
+  <img src="docs/assets/brand/banner-light.svg" alt="Magnetite" width="420">
+</picture>
+
+**A hardened, capability-based x86-64 microkernel, written from scratch in Rust.**
+
+</div>
+
+---
+
 # Contributing
 
-Thanks for your interest! This is a security-focused, from-scratch OS. This
+Thanks for your interest! This is a security-focused, from-scratch kernel. This
 guide explains how we work.
 
 ## Ground rules
@@ -74,5 +87,5 @@ versions, and the **full serial log**. For crashes, rerun with
 
 ## Security issues
 
-Do **not** open public issues for vulnerabilities in this OS. See
+Do **not** open public issues for vulnerabilities in this kernel. See
 [SECURITY.md](SECURITY.md).

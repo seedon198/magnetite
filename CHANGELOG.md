@@ -1,3 +1,16 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/banner-dark.svg">
+  <img src="docs/assets/brand/banner-light.svg" alt="Magnetite" width="420">
+</picture>
+
+**A hardened, capability-based x86-64 microkernel, written from scratch in Rust.**
+
+</div>
+
+---
+
 # Changelog
 
 All notable changes are documented here. The format follows
@@ -18,6 +31,8 @@ All notable changes are documented here. The format follows
   architecture diagram, plus the scripts that generate them
   (`scripts/brand/`). The README is rewritten around them, with current
   status (v0.3.0, M4 under way) and a milestone table.
+- The changelog, code of conduct, contributing guide and security policy open
+  with the same brand banner and tagline as the README.
 
 ### M4: Scheduling & userspace
 
