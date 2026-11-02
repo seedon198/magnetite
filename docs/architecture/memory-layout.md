@@ -20,7 +20,7 @@ in ordinary **user** address spaces, not in the kernel half.
 | `0x0000000000000000` | `0x0000000000000fff` | 4 KiB | Unmapped - catches NULL dereferences |
 | `0x0000000000001000` | `0x00007fffffffffff` | ~128 TiB | **User space** (per task: a server or tool) |
 | `0x0000800000000000` | `0xffff7fffffffffff` | - | Non-canonical hole (#GP on access) |
-| `0xffff800000000000` | HHDM + RAM | ≤ 64 TiB | **HHDM** - direct map of physical memory (offset from Limine) |
+| `0xffff800000000000` + random | HHDM + RAM | ≤ 64 TiB | **HHDM** - direct map of physical memory; Limine randomizes its base in 1 GiB steps within the first 32 TiB (#70) |
 | `0xfffffd0000000000` | grows up | 20 KiB per thread | **Kernel stacks** - per thread: an unmapped guard page, then 16 KiB RW+NX (PML4 slot 506, #82) |
 | `0xfffffe0000000000` | `0xfffffe0000000fff` | 4 KiB | **LAPIC registers** - xAPIC MMIO page, uncached RW+NX (PML4 slot 508, #80) |
 | `0xffffff8000000000` | `0xffffffff7fffffff` | ~510 GiB | **Kernel heap** - grows up from the base, frames mapped on demand (RW+NX) |

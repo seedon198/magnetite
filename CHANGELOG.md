@@ -341,6 +341,11 @@ All notable changes are documented here. The format follows
   bare-metal clippy command too), the capability work that moves from M4 to M5
   (#162 and #156, now on the roadmap), and doc comments that had drifted onto
   the wrong items.
+- The HHDM base is now randomized each boot (#70). The setting had been in
+  `limine.conf` all along, but Limine reads `randomise_hhdm_base` only while
+  handling a paging-mode request, and the kernel made none. A
+  `PagingModeRequest` for 4-level paging (which the kernel assumes) turns it
+  on; no newer protocol revision or nightly-only crate was needed.
 
 ## [0.3.0] - 2026-10-28
 
