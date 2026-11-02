@@ -88,7 +88,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 - [x] Blocking synchronous IPC: `Endpoint` send/receive/call, capability transfer (#81)
 - [x] First user task running under a restricted capability set (#82)
 - [x] FPU/SSE state save and restore (#83, [ADR 0021](adr/0021-fpu-sse-state.md))
-- [ ] Docs: threads, scheduling, IPC and the syscall boundary (#84)
+- [x] Docs: threads, scheduling, IPC and the syscall boundary (#84): [scheduling.md](architecture/scheduling.md), [ipc.md](architecture/ipc.md), [syscalls.md](architecture/syscalls.md)
 
 ## M5: User servers
 

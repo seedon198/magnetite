@@ -36,6 +36,11 @@ All notable changes are documented here. The format follows
 
 ### M4: Scheduling & userspace
 
+- Documentation (#84): new `docs/architecture/scheduling.md` (threads, the
+  context switch, round-robin and timer preemption, the idle thread, exit and
+  reaping, FPU state) and `docs/architecture/ipc.md` (Endpoints, Call and
+  Reply, badges, capability transfer, the console server), linked from the
+  docs index; the security model's status describes M4 as built.
 - FPU and SSE state per thread (#83), per
   [ADR 0021](docs/adr/0021-fpu-sse-state.md). `hal::fpu::init` enables x87 and
   SSE (SSE instructions in ring 3 raised `#UD` before) and captures a clean

@@ -2,8 +2,10 @@
 
 > Status: the **model is implemented in milestone M3**
 > ([ADR 0006](../adr/0006-security-model.md), [ADR 0016](../adr/0016-capability-implementation.md));
-> see [capabilities.md](capabilities.md) for how. Blocking IPC and the ring-3
-> `syscall` entry land in M4 (they need threads).
+> see [capabilities.md](capabilities.md) for how. M4 added blocking IPC
+> ([ipc.md](ipc.md)) and ring-3 tasks behind the `syscall` boundary
+> ([syscalls.md](syscalls.md), [scheduling.md](scheduling.md)): a task reaches
+> the kernel only by invoking a capability it holds.
 
 The system is built around **capabilities** and **least privilege**. This page
 describes the model; [capabilities.md](capabilities.md) describes the
