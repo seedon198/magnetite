@@ -2,7 +2,10 @@
 //!
 //! Uses the `syscall`/`sysret` fast path: [`init`] programs the MSRs
 //! (`EFER.SCE`, `STAR`, `LSTAR`, `FMASK`), [`syscall_entry`] is the kernel entry
-//! stub, and [`enter_user_once`] drops to ring 3 via `iretq`. The
+//! stub, and [`enter_user_once`] drops to ring 3 via `iretq`. The other entry
+//! paths are closed: `CSTAR` (a `syscall` from compatibility mode) points at a
+//! stub that hands the caller to a registered [`CompatHandler`] to be killed,
+//! and `SYSENTER_CS` is 0, so `sysenter` faults in ring 3 (#102). The
 //! message-register ABI is [`capability::abi`]: `rdi` = invoked capability id,
 //! `rsi` = packed `MessageInfo`, `rdx`/`r8`/`r9`/`r10` = message registers 0-3
 //! (`rcx`/`r11` are reserved by the CPU for the return RIP/RFLAGS); `rax`
@@ -23,11 +26,16 @@ use crate::cpu::{rdmsr, wrmsr};
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
+const IA32_CSTAR: u32 = 0xC000_0083;
 const IA32_FMASK: u32 = 0xC000_0084;
+const IA32_SYSENTER_CS: u32 = 0x174;
+const IA32_SYSENTER_ESP: u32 = 0x175;
+const IA32_SYSENTER_EIP: u32 = 0x176;
 const EFER_SCE: u64 = 1 << 0;
 
 /// `STAR`: `syscall` loads kernel CS 0x08 / SS 0x10; the sysret base 0x18 yields
-/// user CS 0x28|3 and SS 0x20|3 (the GDT in `hal::gdt` is ordered for this).
+/// user CS 0x28|3 and SS 0x20|3 (the GDT in `hal::gdt` is ordered for this, and
+/// keeps slot 0x18 itself null).
 const STAR_VALUE: u64 = (0x08u64 << 32) | (0x18u64 << 48);
 /// Clear on syscall entry: IF (no interrupts in the stub), TF, DF, AC and NT.
 /// User code can set NT with `popfq`; `syscall` would carry it into the
@@ -76,6 +84,12 @@ pub type Handler = fn(&mut SyscallArgs) -> u64;
 
 static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Ends the current thread after a `syscall` from compatibility mode. Runs on
+/// that thread's kernel stack with interrupts off and never returns to it.
+pub type CompatHandler = fn() -> !;
+
+static COMPAT_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Fallback kernel stack for the syscall entry stub, used until the kernel
 /// installs a thread's own with [`set_kernel_stack`].
 #[repr(C, align(16))]
@@ -97,6 +111,12 @@ pub fn register(handler: Handler) {
     HANDLER.store(handler as *mut (), Ordering::Release);
 }
 
+/// Register the handler that kills a thread whose `syscall` arrived from
+/// compatibility mode. Call before entering ring 3.
+pub fn register_compat(handler: CompatHandler) {
+    COMPAT_HANDLER.store(handler as *mut (), Ordering::Release);
+}
+
 /// Set the kernel stack the entry stub switches to. The kernel calls this on
 /// every context switch with the next thread's kernel stack (ADR 0019).
 pub fn set_kernel_stack(top: u64) {
@@ -115,11 +135,18 @@ pub fn init() {
     let efer = rdmsr(IA32_EFER);
     // SAFETY: enabling SCE only turns on the `syscall`/`sysret` instructions;
     // STAR/LSTAR/FMASK then define a valid kernel entry per the GDT layout.
+    // CSTAR gets a stub that switches stacks before touching memory, and a
+    // zero SYSENTER_CS makes `sysenter` raise #GP, so neither leaves an entry
+    // into ring 0 at a firmware-chosen address.
     unsafe {
         wrmsr(IA32_EFER, efer | EFER_SCE);
         wrmsr(IA32_STAR, STAR_VALUE);
         wrmsr(IA32_LSTAR, syscall_entry as *const () as u64);
+        wrmsr(IA32_CSTAR, syscall_compat_entry as *const () as u64);
         wrmsr(IA32_FMASK, FMASK_VALUE);
+        wrmsr(IA32_SYSENTER_CS, 0);
+        wrmsr(IA32_SYSENTER_ESP, 0);
+        wrmsr(IA32_SYSENTER_EIP, 0);
     }
 }
 
@@ -148,8 +175,23 @@ extern "C" fn syscall_dispatch(args: *mut SyscallArgs) -> u64 {
     }
 }
 
+/// The Rust side of the CSTAR stub: hand the caller to the compat handler.
+/// With none registered, there is no thread to end, so halt the kernel.
+#[unsafe(no_mangle)]
+extern "C" fn syscall_compat_dispatch() -> ! {
+    let raw = COMPAT_HANDLER.load(Ordering::Acquire);
+    assert!(
+        !raw.is_null(),
+        "syscall: compatibility-mode syscall with no handler registered"
+    );
+    // SAFETY: `raw` is a `CompatHandler` fn pointer stored by `register_compat`.
+    let handler: CompatHandler = unsafe { core::mem::transmute(raw) };
+    handler()
+}
+
 extern "C" {
     fn syscall_entry();
+    fn syscall_compat_entry();
     fn enter_user_once_asm(entry: *const UserEntry) -> !;
 }
 
@@ -162,6 +204,11 @@ extern "C" {
 // mr0..3, r12 = receive slot, r13 = slot to send; rax = status out, and rdi,
 // rsi, rdx, r8 to r10 are reloaded from SyscallArgs (the handler's outputs).
 // Twelve words are pushed, keeping rsp 16-byte aligned for the call.
+//
+// syscall_compat_entry (CSTAR target) is unreachable while the GDT has no
+// 32-bit user code segment, and kept closed in case one appears. It trusts no
+// user register: it switches to the thread's kernel stack before any memory
+// access and never returns to ring 3. IF is clear (FMASK applies here too).
 //
 // enter_user_once_asm `iretq`s to ring 3 for good with the message registers
 // loaded and the scratch registers cleared. User selectors: CS 0x2b, SS 0x23
@@ -200,6 +247,14 @@ global_asm!(
     "    pop rcx",
     "    pop rsp", // user RSP
     "    sysretq",
+    //
+    ".global syscall_compat_entry",
+    ".p2align 4",
+    "syscall_compat_entry:",
+    "    mov rsp, [rip + SYSCALL_KSTACK_TOP]",
+    "    xor ebp, ebp",
+    "    call syscall_compat_dispatch",
+    "    ud2",
     //
     ".global enter_user_once_asm",
     ".p2align 4",

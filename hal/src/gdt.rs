@@ -75,12 +75,18 @@ const fn segment(access: u8, flags: u8) -> u64 {
 
 // Access bytes: P|S set; code adds E; user sets DPL=3.
 // Flags nibble: G=0x8, DB=0x4, L=0x2.
+//
+// Slot 0x18 is only the base `STAR` hands `sysretq`, which loads fixed CS/SS
+// values (base + 16, base + 8) without reading the descriptor. It must stay
+// null: a present 32-bit DPL 3 code segment there would let ring 3 far-return
+// into compatibility mode and `syscall` to `IA32_CSTAR` on a stack it chose
+// (#102). No ring-3 code descriptor here is anything but 64-bit.
 static GDT: Racy<Gdt> = Racy::new(Gdt {
     entries: [
         0,                  // 0x00 null
         segment(0x9A, 0xA), // 0x08 kernel code (64-bit: L)
         segment(0x92, 0xC), // 0x10 kernel data
-        segment(0xFA, 0xC), // 0x18 user code (32-bit; STAR base for sysret)
+        0,                  // 0x18 null: STAR's sysret base, never loaded (#102)
         segment(0xF2, 0xC), // 0x20 user data
         segment(0xFA, 0xA), // 0x28 user code (64-bit: L)
         0,                  // 0x30 TSS low  (filled in init)

@@ -421,8 +421,11 @@ vector_stub_\n :
     .set i, i+1
 .endr
 
-// Table of stub addresses, indexed by vector.
-.section .rodata
+// Table of stub addresses, indexed by vector. Push and pop the section: module
+// asm from several `global_asm!` blocks shares one section state, and a bare
+// `.section .rodata` here would put whatever asm follows it into `.rodata`
+// (non-executable), as it did the syscall stubs on CI.
+.pushsection .rodata
 .align 8
 .global VECTOR_STUBS
 VECTOR_STUBS:
@@ -434,5 +437,6 @@ VECTOR_STUBS:
     stubaddr %j
     .set j, j+1
 .endr
+.popsection
 "#
 );
