@@ -30,8 +30,8 @@
 > CPU tables, memory management and hardening, a capability model, threads,
 > synchronous IPC, and its first user programs: separately built tasks running
 > in ring 3, confined to the capabilities they are given
-> ([v0.3.0](https://github.com/seedon198/magnetite/releases/tag/v0.3.0), with
-> M4 under way). User-space servers and the security tooling are still ahead.
+> ([v0.4.0](https://github.com/seedon198/magnetite/releases/tag/v0.4.0), M4
+> complete). User-space servers (M5) and the security tooling are still ahead.
 > For authorized security research and testing only.
 
 <p align="center">
@@ -159,8 +159,8 @@ cargo xtask run        # build the ISO and boot it in QEMU (serial on your termi
 | **M1** Kernel core | GDT/IDT/exceptions in `hal`, panic, logging, memory map | ✅ [v0.1.0](https://github.com/seedon198/magnetite/releases/tag/v0.1.0) |
 | **M2** Memory & isolation | Frame allocator, own page tables, W^X, KASLR, guard pages | ✅ [v0.2.0](https://github.com/seedon198/magnetite/releases/tag/v0.2.0) |
 | **M3** Capabilities | Capability spaces, Untyped and retype, invocation | ✅ [v0.3.0](https://github.com/seedon198/magnetite/releases/tag/v0.3.0) |
-| **M4** Scheduling & IPC | Threads, preemption, ring 3, synchronous IPC | 🔨 in progress |
-| **M5** User servers | First user-space server and device manager over IPC | planned |
+| **M4** Scheduling & IPC | Threads, preemption, ring 3, synchronous IPC | ✅ [v0.4.0](https://github.com/seedon198/magnetite/releases/tag/v0.4.0) |
+| **M5** User servers | First user-space server and device manager over IPC | next |
 | **M6** Devices & network | virtio and real NIC drivers as servers, network stack | planned |
 | **M7** Security runtime | Embedded scripting runtime and the first native tools | planned |
 
