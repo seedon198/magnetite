@@ -13,7 +13,7 @@
 
 # Contributing
 
-Thanks for your interest! This is a security-focused, from-scratch OS. This
+Thanks for your interest! This is a security-focused, from-scratch kernel. This
 guide explains how we work.
 
 ## Ground rules
@@ -87,5 +87,5 @@ versions, and the **full serial log**. For crashes, rerun with
 
 ## Security issues
 
-Do **not** open public issues for vulnerabilities in this OS. See
+Do **not** open public issues for vulnerabilities in this kernel. See
 [SECURITY.md](SECURITY.md).
