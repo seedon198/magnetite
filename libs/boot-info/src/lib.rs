@@ -12,7 +12,7 @@
 
 /// Maximum number of physical memory regions we record. Real firmware memory
 /// maps are well under this.
-pub const MAX_MEMORY_REGIONS: usize = 128;
+pub const MAX_MEMORY_REGIONS: usize = 256;
 
 /// The kind of a physical memory region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +179,12 @@ pub struct BootInfo {
     region_count: usize,
     modules: [Module; MAX_MODULES],
     module_count: usize,
+    /// Regions and modules that did not fit their tables (#124).
+    dropped_regions: usize,
+    dropped_modules: usize,
+    /// The end of the highest region the bootloader reported, dropped ones
+    /// included.
+    map_end: u64,
 }
 
 impl Default for BootInfo {
@@ -203,13 +209,19 @@ impl BootInfo {
             region_count: 0,
             modules: [Module::EMPTY; MAX_MODULES],
             module_count: 0,
+            dropped_regions: 0,
+            dropped_modules: 0,
+            map_end: 0,
         }
     }
 
-    /// Append a memory region. Returns `false` if the table is full (the region
-    /// is dropped), which the caller should treat as a configuration error.
+    /// Append a memory region. Returns `false` if the table is full: the region
+    /// is dropped and counted in [`dropped_regions`](Self::dropped_regions),
+    /// though it still counts towards [`highest_address`](Self::highest_address).
     pub fn push_region(&mut self, region: MemoryRegion) -> bool {
+        self.map_end = self.map_end.max(region.base.saturating_add(region.length));
         if self.region_count >= MAX_MEMORY_REGIONS {
+            self.dropped_regions += 1;
             return false;
         }
         self.regions[self.region_count] = region;
@@ -217,10 +229,11 @@ impl BootInfo {
         true
     }
 
-    /// Append a boot module. Returns `false` if the table is full (the module
-    /// is dropped).
+    /// Append a boot module. Returns `false` if the table is full: the module
+    /// is dropped and counted in [`dropped_modules`](Self::dropped_modules).
     pub fn push_module(&mut self, module: Module) -> bool {
         if self.module_count >= MAX_MODULES {
+            self.dropped_modules += 1;
             return false;
         }
         self.modules[self.module_count] = module;
@@ -262,14 +275,23 @@ impl BootInfo {
             .sum()
     }
 
-    /// The highest physical address reported by any region (including MMIO).
+    /// The highest physical address reported by any region, MMIO and regions
+    /// dropped for lack of room included: the extent the HHDM must cover.
     #[must_use]
     pub fn highest_address(&self) -> u64 {
-        self.regions()
-            .iter()
-            .map(|r| r.base + r.length)
-            .max()
-            .unwrap_or(0)
+        self.map_end
+    }
+
+    /// Memory regions the bootloader reported that did not fit the table.
+    #[must_use]
+    pub fn dropped_regions(&self) -> usize {
+        self.dropped_regions
+    }
+
+    /// Boot modules that did not fit the table.
+    #[must_use]
+    pub fn dropped_modules(&self) -> usize {
+        self.dropped_modules
     }
 
     /// Total bytes of [`RegionKind::Usable`] RAM.
@@ -336,6 +358,23 @@ mod tests {
         }
         assert!(!bi.push_region(region(0, 1, RegionKind::Usable)));
         assert_eq!(bi.regions().len(), MAX_MEMORY_REGIONS);
+    }
+
+    #[test]
+    fn dropped_entries_are_counted_and_still_bound_the_map() {
+        let mut bi = BootInfo::new();
+        for i in 0..MAX_MEMORY_REGIONS as u64 {
+            assert!(bi.push_region(region(i * 0x1000, 0x1000, RegionKind::Usable)));
+        }
+        // A high reserved region past the table's capacity: dropped, but the
+        // map still ends at its end (the HHDM maps it, #124).
+        assert!(!bi.push_region(region(0xfee0_0000, 0x1000, RegionKind::Reserved)));
+        assert_eq!(bi.dropped_regions(), 1);
+        assert_eq!(bi.highest_address(), 0xfee0_1000);
+        for _ in 0..=MAX_MODULES {
+            bi.push_module(Module::EMPTY);
+        }
+        assert_eq!(bi.dropped_modules(), 1);
     }
 
     #[test]

@@ -8,7 +8,12 @@
  *
  * Each loadable output section gets its own PT_LOAD segment so the kernel can
  * map them with exact W^X permissions: .text is R-X, .rodata is R--, .data/.bss
- * are RW-. Section boundary symbols are exported for the memory manager (M2). */
+ * are RW-. Section boundary symbols are exported for the memory manager (M2).
+ *
+ * RELRO (#126): the relocated-but-then-constant sections (.data.rel.ro,
+ * .dynamic, .got, .got.plt) open the data segment, between the page-aligned
+ * __relro_start and __relro_end. Limine writes them while relocating, before
+ * handoff; harden_memory then makes them read-only. */
 
 OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(_start)
@@ -48,14 +53,11 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     __rodata_end = .;
 
-    .data : {
-        __data_start = .;
-        *(.data .data.*)
-
-        /* Limine scans this range for request magic; the markers bound it. */
-        KEEP(*(.requests_start_marker))
-        KEEP(*(.requests))
-        KEEP(*(.requests_end_marker))
+    __data_start = .;
+    __relro_start = .;
+    /* Listed before .data, whose .data.* would otherwise claim .data.rel.ro. */
+    .data.rel.ro : {
+        *(.data.rel.ro .data.rel.ro.*)
     } :data
 
     /* Dynamic linking info: loaded (:data) and pointed at by PT_DYNAMIC
@@ -66,6 +68,17 @@ SECTIONS
 
     .got : { *(.got .got.*) } :data
     .got.plt : { *(.got.plt .got.plt.*) } :data
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __relro_end = .;
+
+    .data : {
+        *(.data .data.*)
+
+        /* Limine scans this range for request magic; the markers bound it. */
+        KEEP(*(.requests_start_marker))
+        KEEP(*(.requests))
+        KEEP(*(.requests_end_marker))
+    } :data
 
     /* .bss must be last in :data so the on-disk image isn't padded with zeros. */
     .bss : {

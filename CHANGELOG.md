@@ -323,6 +323,17 @@ All notable changes are documented here. The format follows
     used `lateout` for a temporary written before an input was read, the
     release build put both in `rax`, and loading DS faulted, so the release
     kernel never booted. The temporary is now a plain `out`.
+- Boot handoff and build (#26, #124, #126):
+  - `BootInfo` holds 256 memory regions (was 128) and counts what does not
+    fit; `kmain` warns about dropped regions or modules, and
+    `highest_address()` (which bounds the HHDM NX range) now covers the
+    whole bootloader map, dropped entries included.
+  - RELRO: the linker script groups `.data.rel.ro`, `.dynamic`, `.got` and
+    `.got.plt` between page-aligned `__relro_start`/`__relro_end` at the start
+    of the data segment, and `harden_memory` makes that range read-only and
+    NX, HHDM alias included, once Limine has applied its relocations.
+  - Every GitHub Action is pinned to a full commit SHA with its version in a
+    comment; Dependabot proposes action updates weekly.
 
 ## [0.3.0] - 2026-10-28
 

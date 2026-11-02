@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+# Every action is pinned to a full commit SHA, with its version in a comment, so
+# a re-pointed tag cannot change what runs (#26). Dependabot proposes updates.
+
 # Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
@@ -32,7 +35,7 @@ jobs:
     name: Build & lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Do not leave the token in .git/config for later steps (#113).
           persist-credentials: false
@@ -77,7 +80,7 @@ jobs:
     name: Unsafe policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Do not leave the token in .git/config for later steps (#113).
           persist-credentials: false
@@ -89,7 +92,7 @@ jobs:
     name: Dash policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Do not leave the token in .git/config for later steps (#113).
           persist-credentials: false
@@ -101,14 +104,14 @@ jobs:
     name: Supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Do not leave the token in .git/config for later steps (#113).
           persist-credentials: false
       - name: Install pinned toolchain
         run: rustup show
       - name: Install cargo-deny and cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-deny,cargo-audit
       - name: cargo deny
@@ -129,7 +132,7 @@ jobs:
         # bugs, such as asm register allocation, show up only there.
         mode: [bios, uefi, uefi-nopit, uefi-release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Do not leave the token in .git/config for later steps (#113).
           persist-credentials: false
@@ -149,7 +152,7 @@ jobs:
         run: ./scripts/boot-test.sh "${MODE%-release}"
       - name: Upload serial log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: serial-${{ matrix.mode }}
           path: build/serial-*.log
