@@ -27,9 +27,9 @@ const CR0_EM: u64 = 1 << 2;
 const CR0_TS: u64 = 1 << 3;
 /// CR0.NE: report x87 errors as `#MF`, not through the legacy IRQ.
 const CR0_NE: u64 = 1 << 5;
-/// CR4.OSFXSR: the OS uses `fxsave`/`fxrstor`, enabling SSE.
+/// CR4.OSFXSR: the kernel uses `fxsave`/`fxrstor`, enabling SSE.
 const CR4_OSFXSR: u64 = 1 << 9;
-/// CR4.OSXMMEXCPT: the OS handles SIMD floating-point exceptions (`#XM`).
+/// CR4.OSXMMEXCPT: the kernel handles SIMD floating-point exceptions (`#XM`).
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
 
 /// The 512-byte `fxsave` image (Intel SDM Vol. 1 §10.5.1), 16-byte aligned as

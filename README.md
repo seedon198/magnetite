@@ -80,7 +80,7 @@ What works on `main` today, verified on every boot in QEMU:
 | `unsafe` policy | **No `unsafe`** outside `hal`, `kernel/src/boot` and `libs/sys/src/arch.rs` | Shrinks the trusted, unsafe surface to an auditable core | [0007](docs/adr/0007-unsafe-policy.md) |
 | Kernel model | **Microkernel** | Minimal ring-0 TCB; isolate drivers, network and filesystems in user space | [0004](docs/adr/0004-kernel-architecture.md) |
 | Security model | **Capabilities** (least privilege) | No ambient authority; every resource is an unforgeable handle | [0006](docs/adr/0006-security-model.md) |
-| Offensive layer | **Native tools + scripting runtime** | Write and run security tooling without rebuilding the system | [0008](docs/adr/0008-native-tooling.md) |
+| Offensive layer | **Native tools + scripting runtime** | Write and run security tooling without rebuilding the kernel | [0008](docs/adr/0008-native-tooling.md) |
 | Toolchain | **Rust + LLVM**, QEMU | Cross-compiles to bare metal from macOS or Linux out of the box | [0002](docs/adr/0002-toolchain.md) |
 | Bootloader | **Limine** | Long mode, higher half, UEFI and BIOS, memory map on entry | [0003](docs/adr/0003-bootloader.md) |
 | Build | **Cargo + `xtask`** | Native Rust build; a Rust task runner wraps ISO, run and debug | [0005](docs/adr/0005-build-system.md) |

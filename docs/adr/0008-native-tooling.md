@@ -5,11 +5,11 @@
 
 ## Context
 
-The OS must be a usable **offensive-security platform**, but a deliberate
+The kernel must host a usable **offensive-security platform**, but a deliberate
 constraint is **native tools only** - we are not porting Linux binaries or
 providing a Linux ABI. We still need a way to write and run security tooling
 (scanners, sniffers, fuzzers, custom protocol pokes) that is fast to iterate on
-and does not require rebuilding and re-flashing the whole OS for every change.
+and does not require rebuilding and re-flashing the whole image for every change.
 
 ## Options considered
 
@@ -23,7 +23,7 @@ and does not require rebuilding and re-flashing the whole OS for every change.
 3. **An embedded scripting runtime (user-space server)**: a small interpreter
    (e.g. a Lua-like or a WASM runtime) runs as a confined server; tools are
    scripts that call a capability-mediated API (raw sockets, timers, memory).
-   Write/iterate tooling live, no OS rebuild. The heavy lifting (packet I/O,
+   Write/iterate tooling live, no kernel rebuild. The heavy lifting (packet I/O,
    crypto, fuzzing cores) stays in reviewed native Rust exposed to scripts.
 4. **Full language runtime (Python-class)**: too large for a `no_std` from-scratch
    system in the near term.
@@ -38,7 +38,7 @@ follow-up ADR at milestone M7, when requirements are concrete.
 
 ## Consequences
 
-- Fast iteration on tooling without rebuilding the OS - the right ergonomics
+- Fast iteration on tooling without rebuilding the kernel - the right ergonomics
   for security experimentation.
 - "Offense" is confined: the runtime holds only the capabilities granted to it
   ([ADR 0006](0006-security-model.md)), so a script can reach raw sockets only
