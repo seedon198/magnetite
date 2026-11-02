@@ -140,6 +140,18 @@ All notable changes are documented here. The format follows
   thread, verified in QEMU (both ran via the context switch). Preemption, ring
   3, and IPC build on this.
 
+### Security
+
+- Closed the compatibility-mode `syscall` entry (#102). GDT slot `0x18` was a
+  present DPL 3 32-bit code segment and `IA32_CSTAR` was never set, so a ring-3
+  task could far-return into compatibility mode, `syscall`, and enter ring 0 at
+  a firmware-chosen address on a stack it picked (a kernel double fault at
+  least). Slot `0x18` is now null (`sysretq` never reads it), `CSTAR` points at
+  a stub that switches to the thread's kernel stack and kills it, and the
+  `SYSENTER` MSRs are zeroed so `sysenter` faults in ring 3. The user-mode demo
+  gains two tasks that try each path and must die by `#GP` and by `#GP` or
+  `#UD`.
+
 ## [0.3.0] - 2026-10-28
 
 M3: the capability model - the microkernel's security core. Unforgeable

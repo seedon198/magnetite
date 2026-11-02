@@ -205,6 +205,7 @@ fn kmain(boot_info: &BootInfo) -> ! {
     // kernel goes through `syscall::handle` or the user-fault hook.
     hal::syscall::init();
     hal::syscall::register(syscall::handle);
+    hal::syscall::register_compat(user::compat_syscall);
     hal::idt::register_user_fault(user::user_fault);
     user::demo(boot_info, preemptive);
 

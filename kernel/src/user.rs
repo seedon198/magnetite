@@ -33,6 +33,8 @@ static MR0: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX
 static RSP_OFFSET: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
 /// Values user threads reported with `report`, OR-ed together per thread.
 static REPORT: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
+/// The exception vector that killed each user thread, plus one (0 = none).
+static KILLED_BY: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
 
 /// The demo's threads, one bit each: only they may use the debug syscalls.
 static DEBUG_THREADS: AtomicU64 = AtomicU64::new(0);
@@ -127,12 +129,25 @@ pub fn debug_syscall(t: ThreadId, args: &SyscallArgs) -> Option<u64> {
 /// carries on. Registered once in `kmain`.
 pub fn user_fault(frame: &mut hal::idt::TrapFrame) -> ! {
     let t = SCHED.lock().current().expect("user: a running thread");
+    KILLED_BY[t.0].store(frame.vector + 1, Ordering::Relaxed);
     crate::info!(
         "user: thread {} killed: {} at {:#x}, rip={:#x}",
         t.0,
         hal::idt::exception_name(frame.vector),
         hal::idt::fault_address(),
         frame.rip
+    );
+    crate::exit_current()
+}
+
+/// A `syscall` from compatibility mode (the `CSTAR` entry): end the thread.
+/// The GDT gives ring 3 no way into compatibility mode, so this is a backstop.
+/// Registered once in `kmain`.
+pub fn compat_syscall() -> ! {
+    let t = SCHED.lock().current().expect("user: a running thread");
+    crate::info!(
+        "user: thread {} killed: syscall from compatibility mode",
+        t.0
     );
     crate::exit_current()
 }
@@ -152,7 +167,11 @@ fn free_frames() -> usize {
 ///   kernel value may reach ring 3, so both reports are zero;
 /// - thread 11 sets `RFLAGS.NT`, issues an unknown syscall (it must return
 ///   `InvalidSyscall`) and exits: the flag must not leak into the kernel,
-///   where a later `iretq` would fault in ring 0.
+///   where a later `iretq` would fault in ring 0;
+/// - thread 15 far-returns to selector `0x1b` to reach compatibility mode and
+///   `syscall` from there, which would enter ring 0 at `IA32_CSTAR` on its own
+///   stack (#102): it must be killed by `#GP` at the far return;
+/// - thread 16 executes `sysenter`, which must fault in ring 3 too.
 pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     // Assembled with `llvm-mc -triple=x86_64 -filetype=obj` and
     // `llvm-objcopy -O binary --only-section=.text`, from:
@@ -189,6 +208,14 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         0x0f, 0x05, 0x48, 0x89, 0xc2, 0xb8, 0x01, 0x01, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x07, 0x00,
         0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
     ];
+    // push 0x1b; lea rax, [rip + 1f]; push rax; retfq; 1: syscall; 2: jmp 2b.
+    // Assembled as YIELD_REPORT.
+    const COMPAT_SYSCALL: [u8; 16] = [
+        0x6a, 0x1b, 0x48, 0x8d, 0x05, 0x03, 0x00, 0x00, 0x00, 0x50, 0x48, 0xcb, 0x0f, 0x05, 0xeb,
+        0xfe,
+    ];
+    // sysenter; 2: jmp 2b. Assembled as YIELD_REPORT.
+    const SYSENTER: [u8; 4] = [0x0f, 0x34, 0xeb, 0xfe];
     // movabs rax, [hhdm]; jmp $
     let mut fault = [0u8; 12];
     fault[..2].copy_from_slice(&[0x48, 0xA1]);
@@ -201,10 +228,12 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         && spawn_user(ThreadId(8), 2, &YIELD_REPORT, 0xA2, 64)
         && spawn_user(ThreadId(9), 3, &fault, 0, 0)
         && spawn_user(ThreadId(10), 4, &LEAK, 0, 0)
-        && spawn_user(ThreadId(11), 5, &SET_NT_EXIT, 0, 0);
+        && spawn_user(ThreadId(11), 5, &SET_NT_EXIT, 0, 0)
+        && spawn_user(ThreadId(15), 8, &COMPAT_SYSCALL, 0, 0)
+        && spawn_user(ThreadId(16), 9, &SYSENTER, 0, 0);
     assert!(spawned, "user: could not create the demo threads");
 
-    let demo_threads = || (7..=11).map(ThreadId);
+    let demo_threads = || [7, 8, 9, 10, 11, 15, 16].into_iter().map(ThreadId);
     while !demo_threads().all(thread::has_exited) {
         crate::yield_now();
     }
@@ -223,6 +252,21 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         unknown,
         capability::SysError::InvalidSyscall.code(),
         "user: an unknown syscall did not return InvalidSyscall"
+    );
+    let killed_by = |t: usize| KILLED_BY[t].load(Ordering::Relaxed).checked_sub(1);
+    assert_eq!(
+        killed_by(9),
+        Some(14),
+        "user: a kernel read was not a page fault"
+    );
+    assert_eq!(
+        killed_by(15),
+        Some(13),
+        "user: a far return to a 32-bit code segment did not fault"
+    );
+    assert!(
+        matches!(killed_by(16), Some(6 | 13)),
+        "user: sysenter did not fault in ring 3"
     );
     let leaked = REPORT[10].load(Ordering::Relaxed);
     assert_eq!(leaked, 0, "user: kernel register values reached ring 3");
@@ -246,8 +290,9 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         "user: two tasks blocked inside syscalls and came back on their own stacks, were preempted in ring 3 ({n} times) and exited"
     );
     crate::info!("user: no kernel register reached ring 3; RFLAGS.NT did not leak; a kernel read from ring 3 was contained");
+    crate::info!("user: compatibility mode and sysenter are unreachable from ring 3");
 
-    // Every frame the five tasks used (code, stack, page tables, kernel stack)
+    // Every frame the seven tasks used (code, stack, page tables, kernel stack)
     // comes back once they are reaped.
     let reclaimed: usize = demo_threads().map(thread::reap).sum();
     let free_after = free_frames();
@@ -257,5 +302,5 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         "user: exited tasks leaked {} frames",
         free_before.saturating_sub(free_after)
     );
-    crate::info!("user: reclaimed {reclaimed} frames from 5 exited tasks");
+    crate::info!("user: reclaimed {reclaimed} frames from 7 exited tasks");
 }

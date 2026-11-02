@@ -20,8 +20,9 @@ use crate::{KERNEL_SPACE, SCHED};
 
 /// Thread slots: boot (0), cooperative workers (1, 2), preemption spinners
 /// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11), the
-/// console server (12), the fault task (13) and the root task (14).
-pub const MAX: usize = 16;
+/// console server (12), the fault task (13), the root task (14) and the user
+/// demo's entry-path checks (15, 16).
+pub const MAX: usize = 17;
 
 /// Saved contexts, indexed by [`ThreadId`].
 pub static CONTEXTS: [Context; MAX] = [const { Context::new() }; MAX];
