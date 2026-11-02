@@ -46,6 +46,7 @@ pub static ROOT_PASSED: AtomicBool = AtomicBool::new(false);
 pub fn start(t: ThreadId) -> ObjectRef {
     use alloc::boxed::Box;
 
+    selftest();
     let hhdm = ipc::hhdm();
     let frame = hal::frame::alloc_frame().expect("console: no frame");
     let mut ut = Untyped::new(frame.addr(), hal::paging::PAGE);
@@ -75,8 +76,10 @@ pub fn start(t: ThreadId) -> ObjectRef {
     ep
 }
 
-/// One badge's partial line.
+/// One badge's partial line. `in_use` marks the buffer taken: any badge,
+/// including 0, may own one (#129).
 struct Line {
+    in_use: bool,
     badge: u64,
     len: usize,
     buf: [u8; LINE_BYTES],
@@ -84,6 +87,7 @@ struct Line {
 
 impl Line {
     const EMPTY: Self = Self {
+        in_use: false,
         badge: 0,
         len: 0,
         buf: [0; LINE_BYTES],
@@ -102,6 +106,7 @@ impl Line {
     fn push(&mut self, b: u8) {
         if b == b'\n' {
             self.flush();
+            self.in_use = false; // a finished line frees its buffer
             return;
         }
         if self.len == LINE_BYTES {
@@ -112,19 +117,97 @@ impl Line {
     }
 }
 
-/// Bytes shown as UTF-8, with U+FFFD for each invalid sequence.
+/// Bytes shown as UTF-8, with U+FFFD for each invalid sequence, and every
+/// control character escaped: C0 and DEL as `\xNN`, C1 as `\u{NN}`. A `\r` or
+/// an escape sequence would otherwise let a task overwrite the `console[N]:`
+/// prefix on a terminal and pass its text off as a kernel line (#128).
 struct Lossy<'a>(&'a [u8]);
 
 impl fmt::Display for Lossy<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for chunk in self.0.utf8_chunks() {
-            f.write_str(chunk.valid())?;
+            for c in chunk.valid().chars() {
+                match c {
+                    '\0'..='\x1f' | '\x7f' => write!(f, "\\x{:02x}", c as u32)?,
+                    '\u{80}'..='\u{9f}' => write!(f, "\\u{{{:x}}}", c as u32)?,
+                    _ => fmt::Write::write_char(f, c)?,
+                }
+            }
             if !chunk.invalid().is_empty() {
                 f.write_str("\u{fffd}")?;
             }
         }
         Ok(())
     }
+}
+
+/// The line buffer for `badge`: its own, else a free one, else the last,
+/// flushed and taken over. Marks it in use by `badge`.
+fn claim(lines: &mut [Line; LINES], badge: u64) -> usize {
+    let i = lines
+        .iter()
+        .position(|l| l.in_use && l.badge == badge)
+        .or_else(|| lines.iter().position(|l| !l.in_use))
+        .unwrap_or(LINES - 1);
+    let line = &mut lines[i];
+    if !(line.in_use && line.badge == badge) {
+        if line.len > 0 {
+            line.flush();
+        }
+        line.badge = badge;
+        line.in_use = true;
+    }
+    i
+}
+
+/// A fixed buffer to format into, for the self-test.
+struct Fixed {
+    buf: [u8; 128],
+    len: usize,
+}
+
+impl fmt::Write for Fixed {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.len + s.len();
+        self.buf
+            .get_mut(self.len..end)
+            .ok_or(fmt::Error)?
+            .copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// Check, at boot, that a task cannot forge log lines (#128) and that a
+/// badge-0 sender's line is its own (#129).
+fn selftest() {
+    use fmt::Write as _;
+
+    let mut out = Fixed {
+        buf: [0; 128],
+        len: 0,
+    };
+    let forged = b"x\r[INFO] \x1b[31mred\x7f \xc2\x9b\xff";
+    write!(out, "{}", Lossy(forged)).expect("console: self-test buffer");
+    assert_eq!(
+        &out.buf[..out.len],
+        "x\\x0d[INFO] \\x1b[31mred\\x7f \\u{9b}\u{fffd}".as_bytes(),
+        "console: control characters reach the log"
+    );
+
+    let mut lines = [Line::EMPTY; LINES];
+    let zero = claim(&mut lines, 0);
+    lines[zero].push(b'a'); // a partial line from badge 0
+    assert_ne!(
+        claim(&mut lines, 5),
+        zero,
+        "console: badge 5 took badge 0's line"
+    );
+    assert_eq!(claim(&mut lines, 0), zero, "console: badge 0 lost its line");
+    assert_eq!(
+        lines[zero].len, 1,
+        "console: badge 0's partial line was lost"
+    );
 }
 
 /// The bytes a console message carries: the first `min(label, 32)` bytes of
@@ -144,16 +227,7 @@ extern "C" fn server() -> ! {
     loop {
         match next {
             Ok(r) => {
-                let i = lines
-                    .iter()
-                    .position(|l| l.badge == r.badge || l.badge == 0)
-                    .unwrap_or(LINES - 1);
-                if lines[i].badge != r.badge {
-                    if lines[i].len > 0 {
-                        lines[i].flush();
-                    }
-                    lines[i].badge = r.badge;
-                }
+                let i = claim(&mut lines, r.badge);
                 let (buf, n) = bytes(&r);
                 for &b in &buf[..n] {
                     lines[i].push(b);
