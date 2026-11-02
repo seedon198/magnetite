@@ -26,6 +26,8 @@ const USER_STACK_VA: u64 = 0x7fff_f000;
 /// and honoured only for the threads this demo spawns.
 const SYS_HELLO: u64 = 0x100;
 const SYS_REPORT: u64 = 0x101;
+/// Returns where the kernel's frame chain ends inside this syscall (#111).
+const SYS_CHAIN: u64 = 0x102;
 
 /// Each user thread's first message register, handed to it in `rdx`.
 static MR0: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
@@ -123,6 +125,7 @@ pub fn debug_syscall(t: ThreadId, args: &SyscallArgs) -> Option<u64> {
             REPORT[t.0].fetch_or(args.mr[0], Ordering::Relaxed);
             Some(0)
         }
+        SYS_CHAIN => Some(hal::backtrace::chain_end()),
         _ => None,
     }
 }
@@ -175,7 +178,10 @@ fn free_frames() -> usize {
 ///   `syscall` from there, which would enter ring 0 at `IA32_CSTAR` on its own
 ///   stack (#102): it must be killed by a ring-3 fault at the far return
 ///   (`#GP` on hardware; QEMU 8 raises `#PF` reading the user stack first);
-/// - thread 16 executes `sysenter`, which must fault in ring 3 too.
+/// - thread 16 executes `sysenter`, which must fault in ring 3 too;
+/// - thread 17 sets `rbp` to a marker and asks where the kernel's frame chain
+///   ends inside its syscall: at 0, never at the user's `rbp` (#111), which
+///   must come back unchanged.
 pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     // Assembled with `llvm-mc -triple=x86_64 -filetype=obj` and
     // `llvm-objcopy -O binary --only-section=.text`, from:
@@ -220,6 +226,14 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     ];
     // sysenter; 2: jmp 2b. Assembled as YIELD_REPORT.
     const SYSENTER: [u8; 4] = [0x0f, 0x34, 0xeb, 0xfe];
+    // mov ebp, 0x12345678; chain (0x102); mov rdx, rbp; xor rdx, 0x12345678;
+    // or rdx, rax; report (0x101); exit. Zero exactly when the chain ended at
+    // 0 and rbp came back. Assembled as YIELD_REPORT.
+    const RBP_CHAIN: [u8; 41] = [
+        0xbd, 0x78, 0x56, 0x34, 0x12, 0xb8, 0x02, 0x01, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x89, 0xea,
+        0x48, 0x81, 0xf2, 0x78, 0x56, 0x34, 0x12, 0x48, 0x09, 0xc2, 0xb8, 0x01, 0x01, 0x00, 0x00,
+        0x0f, 0x05, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
+    ];
     // movabs rax, [hhdm]; jmp $
     let mut fault = [0u8; 12];
     fault[..2].copy_from_slice(&[0x48, 0xA1]);
@@ -234,10 +248,11 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         && spawn_user(ThreadId(10), 4, &LEAK, 0, 0)
         && spawn_user(ThreadId(11), 5, &SET_NT_EXIT, 0, 0)
         && spawn_user(ThreadId(15), 8, &COMPAT_SYSCALL, 0, 0)
-        && spawn_user(ThreadId(16), 9, &SYSENTER, 0, 0);
+        && spawn_user(ThreadId(16), 9, &SYSENTER, 0, 0)
+        && spawn_user(ThreadId(17), 10, &RBP_CHAIN, 0, 0);
     assert!(spawned, "user: could not create the demo threads");
 
-    let demo_threads = || [7, 8, 9, 10, 11, 15, 16].into_iter().map(ThreadId);
+    let demo_threads = || [7, 8, 9, 10, 11, 15, 16, 17].into_iter().map(ThreadId);
     while !demo_threads().all(thread::has_exited) {
         crate::yield_now();
     }
@@ -274,6 +289,11 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         matches!(killed_by(16), Some(6 | 13)),
         "user: sysenter did not fault in ring 3"
     );
+    let chain = REPORT[17].load(Ordering::Relaxed);
+    assert_eq!(
+        chain, 0,
+        "user: the kernel frame chain reached a user rbp, or rbp was not restored"
+    );
     let leaked = REPORT[10].load(Ordering::Relaxed);
     assert_eq!(leaked, 0, "user: kernel register values reached ring 3");
     let n = thread::USER_PREEMPTIONS.load(Ordering::Relaxed);
@@ -297,8 +317,9 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
     );
     crate::info!("user: no kernel register reached ring 3; RFLAGS.NT did not leak; a kernel read from ring 3 was contained");
     crate::info!("user: compatibility mode and sysenter are unreachable from ring 3");
+    crate::info!("user: the kernel frame chain ends at the syscall entry; user rbp preserved");
 
-    // Every frame the seven tasks used (code, stack, page tables, kernel stack)
+    // Every frame the eight tasks used (code, stack, page tables, kernel stack)
     // comes back once they are reaped.
     let reclaimed: usize = demo_threads().map(thread::reap).sum();
     let free_after = free_frames();
@@ -308,5 +329,5 @@ pub fn demo(boot_info: &BootInfo, preemptive: bool) {
         "user: exited tasks leaked {} frames",
         free_before.saturating_sub(free_after)
     );
-    crate::info!("user: reclaimed {reclaimed} frames from 7 exited tasks");
+    crate::info!("user: reclaimed {reclaimed} frames from 8 exited tasks");
 }

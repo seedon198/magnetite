@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use boot_info::BootInfo;
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use hal::paging::{AddressSpace, Flags};
 use hal::serial::SerialPort;
 use hal::sync::SpinLock;
@@ -538,6 +538,15 @@ fn init_heap() {
     }
 }
 
+/// A [`Write`] sink that drops everything, for self-checks that print.
+struct Discard;
+
+impl Write for Discard {
+    fn write_str(&mut self, _: &str) -> core::fmt::Result {
+        Ok(())
+    }
+}
+
 /// Register named memory regions for page-fault classification, then verify the
 /// recoverable probe (a guard page faults and recovers; mapped memory reads
 /// fine) and the classifier.
@@ -566,6 +575,11 @@ fn init_fault_diagnostics(boot_info: &BootInfo) {
     assert!(guard_faults, "guard page should be unmapped");
     assert!(text_ok, "mapped .text should be readable");
     info!("pf: probe verified - guard page faults & recovers, mapped memory reads ok");
+
+    // A backtrace over a bad frame link stops instead of faulting (#111).
+    let frames = hal::backtrace::print_from(&mut Discard, guard);
+    assert_eq!(frames, 0, "backtrace walked an unmapped frame");
+    info!("backtrace: an unmapped frame link ends the walk without a fault");
 
     // Show the classifier naming a few representative addresses.
     let samples = [
@@ -1064,9 +1078,15 @@ fn demo_preemption() {
     );
 }
 
+/// Set by the first panic: a panic while reporting one halts at once (#111).
+static PANICKING: AtomicBool = AtomicBool::new(false);
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     hal::cpu::disable_interrupts();
+    if PANICKING.swap(true, Ordering::Relaxed) {
+        hal::cpu::halt_loop();
+    }
 
     // Report over a fresh serial port (not the logger), so a panic while the log
     // lock is held still reports.

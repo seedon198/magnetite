@@ -156,6 +156,17 @@ All notable changes are documented here. The format follows
   (the syscall and ring-3 entry stubs) could land in non-executable `.rodata`
   and fault on first use, depending on how the build was partitioned. It now
   uses `.pushsection`/`.popsection`.
+- The crash backtrace could follow a user-controlled `rbp` and recurse on a
+  nested page fault (#111). `syscall_entry` called Rust with the user's `rbp`
+  loaded and the IDT common stub set `rbp` to the trap frame, so a walk read
+  user-chosen or meaningless links, and an unmapped one faulted inside the
+  reporter, which reported again until a double fault. Both entries now zero
+  `rbp` (the syscall entry saves and restores the user's), the walk probes
+  each frame with `fault::probe_read` before reading it, the exception
+  reporter and the panic handler halt on reentry, and the reporter prints no
+  kernel backtrace for a ring-3 frame. Two boot checks cover it: a walk from
+  an unmapped link returns no frames, and a ring-3 task with a marker `rbp`
+  checks that the kernel chain ends at 0 and its `rbp` comes back.
 
 ### Fixed
 
