@@ -333,8 +333,7 @@ fn init_frames(boot_info: &BootInfo) {
     }
 
     if !hal::frame::init(&regions[..src.len()], boot_info.hhdm_offset) {
-        warn!("frames: allocator init failed (no usable RAM?)");
-        return;
+        panic!("frames: allocator init failed (no usable RAM?)");
     }
 
     if let Some(s) = hal::frame::stats() {
@@ -366,7 +365,7 @@ fn init_frames(boot_info: &BootInfo) {
         assert_eq!(before, after, "frame smoke test leaked frames");
         info!("frames: alloc/free smoke test passed");
     } else {
-        warn!("frames: smoke test could not allocate");
+        panic!("frames: smoke test could not allocate");
     }
 }
 
@@ -374,8 +373,7 @@ fn init_frames(boot_info: &BootInfo) {
 /// mappings), switch to it, and self-test the mapping path.
 fn init_paging(boot_info: &BootInfo) {
     let Some(aspace) = AddressSpace::new_kernel(boot_info.hhdm_offset) else {
-        warn!("paging: could not allocate a PML4 (out of frames?)");
-        return;
+        panic!("paging: could not allocate a PML4 (out of frames?)");
     };
     aspace.switch();
     thread::init_kernel_root(aspace.root_phys());
@@ -394,7 +392,7 @@ fn init_paging(boot_info: &BootInfo) {
     if ok {
         info!("paging: map/translate/unmap self-test passed");
     } else {
-        warn!("paging: self-test FAILED");
+        panic!("paging: map/translate/unmap self-test failed");
     }
 
     // User address spaces (#82, ADR 0019) copy the kernel half's top-level
@@ -478,8 +476,7 @@ fn harden_memory(boot_info: &BootInfo) {
     let s = boot::kernel_sections();
     let mut guard = KERNEL_SPACE.lock();
     let Some(aspace) = guard.as_mut() else {
-        warn!("harden: no kernel address space; skipping");
-        return;
+        panic!("harden: no kernel address space");
     };
 
     // (range, flags) per section. `protect` adds PRESENT; .text gets neither
@@ -528,10 +525,10 @@ fn harden_memory(boot_info: &BootInfo) {
                 continue;
             };
             let alias = hhdm + (phys & !(hal::paging::PAGE - 1));
-            if aspace.split_huge(alias).is_err() {
-                warn!("harden: out of frames splitting the HHDM at {alias:#x}");
-                continue;
-            }
+            assert!(
+                aspace.split_huge(alias).is_ok(),
+                "harden: out of frames splitting the HHDM at {alias:#x}"
+            );
             if aspace.make_read_only(alias).is_ok() {
                 aliases += 1;
             }
@@ -648,8 +645,7 @@ fn heap_grow(min_bytes: usize) -> Option<(usize, usize)> {
 /// `Vec`/`Box` round-trip correctly).
 fn init_heap() {
     if !HEAP.init(heap_grow) {
-        warn!("heap: init failed (could not map initial region)");
-        return;
+        panic!("heap: init failed (could not map initial region)");
     }
 
     // Grow past the initial chunk (40k u64 = 320 KiB > 256 KiB) to exercise the
@@ -682,7 +678,7 @@ fn init_heap() {
             live
         );
     } else {
-        warn!("heap: self-test FAILED");
+        panic!("heap: Vec/Box self-test failed");
     }
 }
 
@@ -772,8 +768,7 @@ fn demo_untyped(boot_info: &BootInfo) {
     use capability::Untyped;
 
     let Some(frame) = hal::frame::alloc_frame() else {
-        warn!("untyped: no frame for the demo");
-        return;
+        panic!("untyped: no frame for the demo");
     };
     let hhdm = boot_info.hhdm_offset;
     let mut ut = Untyped::new(frame.addr(), hal::paging::PAGE); // 4 KiB region
@@ -787,7 +782,7 @@ fn demo_untyped(boot_info: &BootInfo) {
             ut.free(),
             ut.size()
         ),
-        None => warn!("untyped: retype failed unexpectedly"),
+        None => panic!("untyped: retype failed unexpectedly"),
     }
 
     // An over-budget request (a whole 4 KiB object) must be rejected, leaving
@@ -812,8 +807,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
     const CNODE_SLOTS: usize = 16;
 
     let Some(frame) = hal::frame::alloc_frame() else {
-        warn!("caps: no frame for the demo");
-        return;
+        panic!("caps: no frame for the demo");
     };
     let hhdm = boot_info.hhdm_offset;
     let mut ut = Untyped::new(frame.addr(), hal::paging::PAGE);
@@ -826,9 +820,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
         1,
         hhdm,
     ) else {
-        warn!("caps: CNode retype failed");
-        hal::frame::free_frame(frame);
-        return;
+        panic!("caps: CNode retype failed");
     };
     // `cnode_phys` is a CNode just retyped for CNODE_SLOTS slots (our exclusive
     // HHDM-mapped storage), and we form exactly one CapSpace over it.
@@ -841,9 +833,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
         hal::object::retype(&mut ut, esz, eal, 1, hhdm),
         hal::object::retype(&mut ut, nsz, nal, 1, hhdm),
     ) else {
-        warn!("caps: object retype failed");
-        hal::frame::free_frame(frame);
-        return;
+        panic!("caps: object retype failed");
     };
 
     // Install full-rights capabilities to the objects.
@@ -887,8 +877,7 @@ fn demo_invoke(boot_info: &BootInfo) {
     let hhdm = boot_info.hhdm_offset;
 
     let (Some(ctrl), Some(region)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame()) else {
-        warn!("invoke: no frames for the demo");
-        return;
+        panic!("invoke: no frames for the demo");
     };
 
     // Carve a CNode (cap space), an Untyped control block, and a Notification
@@ -908,10 +897,7 @@ fn demo_invoke(boot_info: &BootInfo) {
         hal::object::retype(&mut boot, un, ua, 1, hhdm),
         hal::object::retype(&mut boot, nsz, nal, 1, hhdm),
     ) else {
-        warn!("invoke: bootstrap retype failed");
-        hal::frame::free_frame(ctrl);
-        hal::frame::free_frame(region);
-        return;
+        panic!("invoke: bootstrap retype failed");
     };
 
     // The Untyped capability's control block describes the (separate) region.
@@ -948,12 +934,7 @@ fn demo_invoke(boot_info: &BootInfo) {
     );
     let frame_phys = match created {
         Ok(InvokeOk::Created(obj)) => obj.phys,
-        other => {
-            warn!("invoke: retype returned {:?}", other);
-            hal::frame::free_frame(ctrl);
-            hal::frame::free_frame(region);
-            return;
-        }
+        other => panic!("invoke: retype returned {other:?}"),
     };
 
     // 2) Identify the new Frame.
@@ -1093,8 +1074,7 @@ fn demo_threads(boot_info: &BootInfo) {
     let hhdm = boot_info.hhdm_offset;
     let (Some(stack_a), Some(stack_b)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame())
     else {
-        warn!("sched: no frames for thread stacks");
-        return;
+        panic!("sched: no frames for thread stacks");
     };
     // One zeroed frame each as a (small) kernel-thread stack, reached via the
     // HHDM. Kept for the rest of boot (the threads are abandoned at halt).

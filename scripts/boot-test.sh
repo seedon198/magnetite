@@ -8,6 +8,11 @@
 # task sends to the console (logged as `[INFO] console[N]: ...`) can never
 # satisfy them.
 #
+# A healthy boot also logs no warning or error: any `[WARN]` or `[ERROR]` line
+# the mode does not expect fails the test (#71). Every in-kernel self-check
+# panics on failure, and the fallbacks that only warn (a missing boot module,
+# a timer that cannot be calibrated) are caught here.
+#
 # We poll the serial log and stop as soon as either appears (no fixed long
 # wait). Pure serial-grep: no special kernel instrumentation is needed.
 #
@@ -26,6 +31,8 @@ MARKERS=(
     '^\[INFO\] ready: '
 )
 PANIC_MARKER="KERNEL PANIC"
+# Warnings this mode expects, as one extended regex ('' = none).
+EXPECTED_WARNINGS='^$'
 ISO="build/kernel.iso"
 LOG="build/serial-${MODE}.log"
 TIMEOUT_SECS="${BOOT_TEST_TIMEOUT:-60}"
@@ -42,6 +49,7 @@ if [[ "$MODE" == uefi-nopit ]]; then
         '^\[WARN\] lapic: timer start failed: CalibrationFailed'
         '^\[INFO\] ready: .*cooperative scheduling'
     )
+    EXPECTED_WARNINGS='^\[WARN\] lapic: timer start failed: CalibrationFailed$'
 fi
 
 qemu_args=(-M "$MACHINE" -cpu qemu64,+smep,+smap -m 256M -cdrom "$ISO" -serial "file:$LOG" -display none -no-reboot)
@@ -102,6 +110,12 @@ for ((i = 0; i < TIMEOUT_SECS * 2; i++)); do
         grep -qE "$m" "$LOG" 2>/dev/null || found=0
     done
     if [[ "$found" -eq 1 ]]; then
+        unexpected="$(tr -d '\r' < "$LOG" | grep -E '^\[(WARN|ERROR)\]' | grep -vE "$EXPECTED_WARNINGS" || true)"
+        if [[ -n "$unexpected" ]]; then
+            echo "boot-test[$MODE]: FAIL - the boot logged unexpected warnings:" >&2
+            echo "$unexpected" >&2
+            exit 1
+        fi
         echo "boot-test[$MODE]: PASS - the root task passed and the kernel is ready"
         exit 0
     fi

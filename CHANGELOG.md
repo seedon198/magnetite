@@ -346,6 +346,13 @@ All notable changes are documented here. The format follows
   handling a paging-mode request, and the kernel made none. A
   `PagingModeRequest` for 4-level paging (which the kernel assumes) turns it
   on; no newer protocol revision or nightly-only crate was needed.
+- Boot self-checks are now enforced by CI (#71): every in-kernel self-check
+  and bring-up step that used to log a warning and carry on (the frame
+  allocator, paging, heap, untyped, capability, invoke, IPC and scheduler
+  checks, and HHDM splitting) now panics, and `scripts/boot-test.sh` fails a
+  boot that logs any `[WARN]` or `[ERROR]` line its mode does not expect, so
+  the remaining fallbacks (a missing boot module, an uncalibrated timer) are
+  caught too.
 
 ## [0.3.0] - 2026-10-28
 

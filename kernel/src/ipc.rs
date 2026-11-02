@@ -272,8 +272,7 @@ pub fn demo(boot_info: &BootInfo) {
     let hhdm = boot_info.hhdm_offset;
 
     let (Some(objects), Some(page)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame()) else {
-        crate::warn!("ipc: no frames for the demo");
-        return;
+        panic!("ipc: no frames for the demo");
     };
     let mut ut = Untyped::new(objects.addr(), hal::paging::PAGE);
     let mut frames = Untyped::new(page.addr(), hal::paging::PAGE);
@@ -286,8 +285,7 @@ pub fn demo(boot_info: &BootInfo) {
         hal::object::retype(&mut ut, esz, eal, 1, hhdm),
         hal::object::retype(&mut frames, fsz, fal, 1, hhdm),
     ) else {
-        crate::warn!("ipc: demo retype failed");
-        return;
+        panic!("ipc: demo retype failed");
     };
 
     // Each CNode was just retyped for SLOTS slots, and each gets exactly one
