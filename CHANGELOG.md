@@ -308,6 +308,21 @@ All notable changes are documented here. The format follows
     part of ADR 0020 (#156).
   - Kernel OOM is already reported: the default `no_std` allocation-error
     handler panics with the size into our panic handler; now documented.
+- CI hardening (#113, #115, #138, #141):
+  - The workflow runs with `permissions: contents: read`, and every checkout
+    sets `persist-credentials: false`, so third-party code the jobs run
+    cannot read a token from `.git/config`.
+  - `check-unsafe.sh` scans whole attributes, so `allow(dead_code,
+    unsafe_code)`, `expect(unsafe_code)` and `cfg_attr(..., allow(...))` no
+    longer pass, and the `libs/sys` exception narrows to `src/arch.rs`.
+  - New `scripts/check-asm-sections.sh`, in CI: every `global_asm!` entry
+    point must be a `.text` symbol, in the normal build and with one codegen
+    unit.
+  - `KERNEL_PROFILE=release cargo xtask iso` builds a release kernel, and CI
+    boots one (`uefi-release`). It found a bug at once: `reload_segments`
+    used `lateout` for a temporary written before an input was read, the
+    release build put both in `rax`, and loading DS faulted, so the release
+    kernel never booted. The temporary is now a plain `out`.
 
 ## [0.3.0] - 2026-10-28
 

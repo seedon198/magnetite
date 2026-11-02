@@ -251,7 +251,11 @@ unsafe fn reload_segments(code_sel: u16, data_sel: u16) {
             "mov fs, {data:x}",
             "mov gs, {data:x}",
             code = in(reg) code_sel as u64,
-            tmp = lateout(reg) _,
+            // `out`, not `lateout`: `tmp` is written before `data` is read,
+            // so it must not share a register with it. With `lateout` the
+            // release build gave both `rax`, the `lea` overwrote the data
+            // selector, and loading DS faulted (found by #141).
+            tmp = out(reg) _,
             data = in(reg) data_sel,
             options(preserves_flags),
         );

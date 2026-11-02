@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege (#113): the jobs only read the repository. With no
+# `permissions` block the token would get the repository default, which can be
+# write on pushes to main, while the boot test runs third-party code (the
+# Limine Makefile, build scripts).
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
@@ -26,6 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do not leave the token in .git/config for later steps (#113).
+          persist-credentials: false
 
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: |
@@ -56,12 +66,21 @@ jobs:
       - name: Build kernel
         run: cargo xtask build
 
+      # Every global_asm! entry point must be a .text symbol, in the normal
+      # build and with one codegen unit, which is how a stray section switch
+      # once put the syscall stubs in .rodata (#137, #138).
+      - name: asm entry points in .text
+        run: ./scripts/check-asm-sections.sh
+
   # Enforce the unsafe-code policy (ADR 0007).
   unsafe-policy:
     name: Unsafe policy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do not leave the token in .git/config for later steps (#113).
+          persist-credentials: false
       - name: Check unsafe is confined to hal
         run: ./scripts/check-unsafe.sh
 
@@ -71,6 +90,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do not leave the token in .git/config for later steps (#113).
+          persist-credentials: false
       - name: Check for en and em dashes
         run: ./scripts/check-dashes.sh
 
@@ -80,6 +102,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do not leave the token in .git/config for later steps (#113).
+          persist-credentials: false
       - name: Install pinned toolchain
         run: rustup show
       - name: Install cargo-deny and cargo-audit
@@ -100,9 +125,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [bios, uefi, uefi-nopit]
+        # `uefi-release` boots the release-profile kernel (#141): optimizer-only
+        # bugs, such as asm register allocation, show up only there.
+        mode: [bios, uefi, uefi-nopit, uefi-release]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do not leave the token in .git/config for later steps (#113).
+          persist-credentials: false
       - name: Install pinned toolchain
         run: rustup show
       - name: Install QEMU, xorriso, and OVMF
@@ -110,9 +140,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86 xorriso ovmf
       - name: Build ISO
+        env:
+          KERNEL_PROFILE: ${{ endsWith(matrix.mode, '-release') && 'release' || 'dev' }}
         run: cargo xtask iso
       - name: Boot test
-        run: ./scripts/boot-test.sh ${{ matrix.mode }}
+        env:
+          MODE: ${{ matrix.mode }}
+        run: ./scripts/boot-test.sh "${MODE%-release}"
       - name: Upload serial log
         if: always()
         uses: actions/upload-artifact@v4

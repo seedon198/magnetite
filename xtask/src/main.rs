@@ -104,7 +104,6 @@ fn cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
 }
 
-/// Cross-compile the kernel and return the path to the resulting ELF.
 /// Build the user programs into `target/user` (a separate target directory,
 /// so their flags never invalidate the kernel's build). Returns each
 /// program's (binary name, ELF path).
@@ -138,14 +137,21 @@ fn build_user() -> Vec<(&'static str, PathBuf)> {
         .collect()
 }
 
+/// Cross-compile the kernel and return the path to the resulting ELF.
+///
+/// `KERNEL_PROFILE=release` builds the kernel with the release profile, so CI
+/// boots the optimized kernel too (#141); anything else, or nothing, builds the
+/// dev profile.
 fn build() -> PathBuf {
-    run(
-        &cargo(),
-        &["build", "--package", "kernel", "--target", KERNEL_TARGET],
-    );
+    let release = std::env::var("KERNEL_PROFILE").is_ok_and(|p| p == "release");
+    let mut args = vec!["build", "--package", "kernel", "--target", KERNEL_TARGET];
+    if release {
+        args.push("--release");
+    }
+    run(&cargo(), &args);
     let elf = PathBuf::from("target")
         .join(KERNEL_TARGET)
-        .join("debug")
+        .join(if release { "release" } else { "debug" })
         .join("kernel");
     if !elf.exists() {
         fail(&format!("expected kernel ELF at {}", elf.display()));
@@ -154,8 +160,6 @@ fn build() -> PathBuf {
     elf
 }
 
-/// Clone the pinned Limine binary branch and build its host `limine` tool.
-/// Idempotent: skips the clone if `limine/` already exists.
 /// Fetch Limine at [`LIMINE_COMMIT`] into `limine/` (or move an existing
 /// checkout there), verify it, and build its host utility. Verified on every
 /// build, so a stale or edited checkout never reaches an ISO.
