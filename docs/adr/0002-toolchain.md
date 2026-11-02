@@ -24,8 +24,10 @@ cross-compile to x86-64 from any host, reproducibly, including in CI. Following
 
 ## Decision
 
-- **Rust via `rustup`**, toolchain pinned in `rust-toolchain.toml`. Start on
-  the stable `x86_64-unknown-none` target; move to a **custom target +
+- **Rust via `rustup`**, toolchain pinned in `rust-toolchain.toml` to an
+  exact release (for example `1.99.1`, not the moving `stable` channel; #114),
+  bumped deliberately in its own PR. Start on the stable
+  `x86_64-unknown-none` target; move to a **custom target +
   `-Zbuild-std` on pinned nightly** only if codegen requirements force it, via
   a follow-up note here.
 - **LLVM tools** through `rustup component add llvm-tools` for
