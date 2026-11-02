@@ -46,7 +46,9 @@ server is busy. If the thread a caller waits on exits, the caller wakes with
 ## Capability transfer
 
 A message may carry **one** capability, **copied**: the sender keeps its own,
-and the receiver gets the same rights and badge.
+and the receiver gets the same rights and badge. The copy is a child of the
+sender's capability in the derivation tree
+([capabilities.md](capabilities.md)), so revoking the sender's takes it back.
 
 - The sender's endpoint capability must hold **`GRANT`**; a `Reply` carries
   one only if the caller consented, by naming a receive slot in its `Call`.

@@ -39,11 +39,34 @@ HHDM), so copies of a capability share one object.
 ## Capability space
 
 Each task's capabilities live in a **flat table** of slots; a `CapId` is an
-index (O(1) lookup). Operations - `insert`/`get`/`delete`/`move`/`copy`/`mint` -
-enforce the rules: a slot fills only when empty, and `copy`/`mint` may only
-attenuate. A **CNode** is the object form of such a table: retyped storage
-holding a `Slot` array, accessed via the HHDM (`hal::object::cnode_cap_space`).
-A growable, two-level space is composed from CNode capabilities.
+index (O(1) lookup). A **CNode** is the object form of such a table: retyped
+storage holding a `Slot` array, accessed via the HHDM
+(`hal::object::cnode_cap_space`). A growable, two-level space is composed
+from CNode capabilities.
+
+## The derivation tree
+
+Every slot also records where its capability came from
+([ADR 0020](../adr/0020-capability-derivation-and-revoke.md), #156). Each
+occupied slot holds a link (previous and next entry, and a depth), and each
+list of links is a pre-order walk of a derivation tree:
+
+| How a capability is made | Its place in the tree |
+|---|---|
+| `copy`, `mint` | a child of the source capability |
+| `UntypedRetype` | a child of the Untyped capability |
+| IPC transfer (`GRANT`) | a child of the sender's capability |
+| `move` | the same place, in a new slot |
+| made by the kernel at boot | a root; every other capability to the same object derives from it |
+
+The tree spans every CNode, so links name slots as `SlotRef`s (a CNode's
+index in the kernel's **CNode registry**, `kernel/src/cspace.rs`, and a slot
+index), never as pointers. The pure `capability::mdb` module does every
+insert, delete and move over a `SlotStore`, which the registry implements; a
+table on its own only reads and writes whole entries. Deleting a capability
+moves what was derived from it up to its parent, and a CNode leaves the
+registry only after every capability in it is deleted. `copy` and `mint` may
+only attenuate, and a slot fills only when empty.
 
 ## Untyped memory and retype
 
@@ -54,10 +77,11 @@ budget and cannot exhaust kernel memory.
 - `Untyped { base, size, watermark }` is a bump allocator over a physical
   region; `allocate(size, align, count)` carves naturally-aligned storage
   (checked for alignment, overflow, and exhaustion). Reclamation is
-  whole-region only. There is **no revoke yet** (#105): when a task is
+  whole-region only. There is **no revoke yet** (#105, being built on the
+  derivation tree above): when a task is
   reaped, the kernel scans every capability space and frees the task's
   CNode, Untyped control block and Untyped region only if no capability
-  anywhere still names an object inside them (`ipc::find_reference`);
+  anywhere still names an object inside them (`find_reference`);
   otherwise the memory stays allocated and the holder is reported. A
   seL4-style capability derivation tree, with revoke that also fails
   threads blocked on a revoked endpoint, is planned before the first `GRANT`
@@ -129,5 +153,6 @@ Moved to M5, tracked:
 |---|---|---|
 | Rights & attenuation | `Capability`, `Rights` | - |
 | Capability space | `CapSpace`, `Slot`, `CapId` | `cnode_cap_space` (HHDM) |
+| Derivation tree | `mdb` (`SlotStore`, `SlotRef`, `Link`) | the kernel's CNode registry |
 | Untyped accounting | `Untyped`, `ObjectKind`, `ObjectRef` | `retype`, `load`/`store_untyped` |
 | Invocation | `Method`, `authorize`, errors | kernel `invoke` + effects |

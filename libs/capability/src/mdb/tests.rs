@@ -8,7 +8,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::*;
-use crate::{Capability, Rights};
+use crate::{CapError, Capability, Rights};
 
 /// A test object: an id, and whether it is an Untyped region (whose
 /// capabilities may parent other objects).
@@ -570,4 +570,63 @@ fn random_operations_keep_every_invariant() {
             check(&st, &m);
         }
     }
+}
+
+#[test]
+fn copy_attenuates_and_rejects_widening() {
+    let mut st = Store::new();
+    let full = Capability::new(
+        Ob {
+            id: 7,
+            untyped: false,
+        },
+        Rights::READ | Rights::WRITE | Rights::MAP,
+    );
+    insert_root(&mut st, s(0, 0), full).unwrap();
+    copy(&mut st, s(0, 0), s(1, 1), Rights::READ).unwrap();
+    let weak = st.get(s(1, 1)).unwrap();
+    assert_eq!(weak.cap.rights, Rights::READ);
+    assert_eq!(weak.cap.object, full.object);
+    assert_eq!(
+        weak.link.prev,
+        Some(s(0, 0)),
+        "a copy is the source's child"
+    );
+    assert!(st.get(s(0, 0)).unwrap().cap.rights.contains(Rights::WRITE));
+    assert_eq!(
+        copy(&mut st, s(0, 0), s(1, 2), Rights::SEND),
+        Err(CapError::NotPermitted)
+    );
+    assert_eq!(
+        copy(&mut st, s(0, 0), s(1, 1), Rights::READ),
+        Err(CapError::Occupied)
+    );
+    assert_eq!(
+        copy(&mut st, s(2, 2), s(1, 2), Rights::READ),
+        Err(CapError::Empty)
+    );
+    assert!(st.get(s(1, 2)).is_none());
+}
+
+#[test]
+fn mint_sets_a_badge_once() {
+    let mut st = Store::new();
+    let ep = Capability::new(
+        Ob {
+            id: 1,
+            untyped: false,
+        },
+        Rights::SEND | Rights::GRANT,
+    );
+    insert_root(&mut st, s(0, 0), ep).unwrap();
+    mint(&mut st, s(0, 0), s(0, 1), Rights::SEND, 0x42).unwrap();
+    let minted = st.get(s(0, 1)).unwrap();
+    assert_eq!((minted.cap.badge, minted.cap.rights), (0x42, Rights::SEND));
+    assert_eq!(minted.link.depth, 1);
+    assert_eq!(
+        mint(&mut st, s(0, 1), s(0, 2), Rights::SEND, 0x43),
+        Err(CapError::NotPermitted)
+    );
+    mint(&mut st, s(0, 1), s(0, 2), Rights::SEND, 0x42).unwrap();
+    assert_eq!(st.get(s(0, 2)).unwrap().link.depth, 2);
 }

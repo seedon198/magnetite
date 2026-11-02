@@ -14,13 +14,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use ::ipc::{Message, Received};
 use capability::{
-    cnode_bytes, slot_align, CapId, Capability, MessageInfo, ObjectKind, ObjectRef, Rights,
-    Untyped, MSG_REGISTERS,
+    cnode_bytes, mdb, slot_align, CapId, Capability, MessageInfo, ObjectKind, ObjectRef, Rights,
+    SlotRef, Untyped, MSG_REGISTERS,
 };
 use sched::ThreadId;
 
 use crate::thread::CONTEXTS;
-use crate::{ipc, SCHED};
+use crate::{cspace, ipc, SCHED};
 
 /// Bytes one message can carry.
 const MAX_BYTES: usize = 8 * MSG_REGISTERS;
@@ -30,6 +30,8 @@ const LINE_BYTES: usize = 128;
 const LINES: usize = 4;
 /// The server's endpoint slot.
 const EP: CapId = CapId(1);
+/// The slot of the endpoint's original capability.
+const ORIGIN: CapId = CapId(2);
 /// Stack for the server thread (it formats log lines).
 const STACK_BYTES: usize = 16 * 1024;
 
@@ -42,8 +44,9 @@ pub const ROOT_BADGE: u64 = 1;
 pub static ROOT_PASSED: AtomicBool = AtomicBool::new(false);
 
 /// Create the console endpoint and start the server as kernel thread `t`.
-/// Returns the endpoint, for the capabilities handed to tasks.
-pub fn start(t: ThreadId) -> ObjectRef {
+/// Returns the slot of the endpoint's original capability, which every
+/// capability handed to a task is minted from.
+pub fn start(t: ThreadId) -> SlotRef {
     use alloc::boxed::Box;
 
     selftest();
@@ -64,16 +67,22 @@ pub fn start(t: ThreadId) -> ObjectRef {
     let ep = ObjectRef::new(ObjectKind::Endpoint, ep);
 
     // `cnode` was just retyped for `slots` slots and gets exactly one CapSpace.
-    let mut space = hal::object::cnode_cap_space(cnode, slots, hhdm);
-    space
-        .insert_at(EP, Capability::new(ep, Rights::RECV))
-        .expect("console: endpoint slot");
-    ipc::set_cspace(t, ObjectRef::new(ObjectKind::CNode, cnode), space);
+    let space = hal::object::cnode_cap_space(cnode, slots, hhdm);
+    cspace::install(t, ObjectRef::new(ObjectKind::CNode, cnode), space);
+    // Every capability to the endpoint derives from this original (ADR 0020),
+    // which the server keeps; it receives through a RECV-only copy.
+    let origin = cspace::insert_root(t, ORIGIN, Capability::new(ep, Rights::ALL))
+        .expect("console: the endpoint's original");
+    cspace::with(|r| {
+        let at = r.slot(t, EP)?;
+        mdb::copy(r, origin, at, Rights::RECV)
+    })
+    .expect("console: endpoint slot");
 
     let stack = Box::leak(alloc::vec![0u8; STACK_BYTES].into_boxed_slice());
     CONTEXTS[t.0].init(stack.as_ptr() as u64 + STACK_BYTES as u64, server);
     hal::cpu::without_interrupts(|| SCHED.lock().admit(t));
-    ep
+    origin
 }
 
 /// One badge's partial line. `in_use` marks the buffer taken: any badge,

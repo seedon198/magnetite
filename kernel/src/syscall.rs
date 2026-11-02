@@ -42,7 +42,7 @@ fn dispatch(t: ThreadId, args: &mut SyscallArgs) -> Result<(), SysError> {
         sys::REPLY => ipc::reply(msg, send_slot(args, msg)?).map_err(ipc_error),
         sys::SEND | sys::RECV | sys::CALL | sys::REPLY_RECV => {
             let slot = abi::slot(args.cap)?;
-            let kind = ipc::with_cspace(t, |cs, _| cs.get(slot).map(|c| c.object.kind))
+            let kind = crate::cspace::with_space(t, |cs, _| cs.get(slot).map(|c| c.object.kind))
                 .and_then(Result::ok)
                 .ok_or(SysError::InvalidCap)?;
             if kind != ObjectKind::Endpoint {

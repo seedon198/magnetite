@@ -286,4 +286,11 @@ mod tests {
         assert_eq!(cnode_bytes(16), 16 * slot_bytes());
         assert!(slot_align().is_power_of_two());
     }
+
+    #[test]
+    fn a_root_cnode_still_fits_one_page() {
+        // A slot carries its derivation link too (ADR 0020 decision 7).
+        assert_eq!(slot_bytes(), 48);
+        assert!(cnode_bytes(64) <= 4096);
+    }
 }
