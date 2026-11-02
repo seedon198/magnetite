@@ -160,7 +160,8 @@ the serial log; the pure crates add host unit tests.
 ## Known limitations / future work
 
 - Large-page / DMA-contiguous physical allocation (deferred from #38).
-- `unmap`/`protect` do not yet reclaim now-empty intermediate page tables.
+- `unmap` frees the intermediate tables it empties (#64), but never the root
+  or a kernel-half PDPT (shared by every user space).
 - HHDM-base randomization pending a newer Limine protocol revision.
 - The kernel heap window is a fixed base, not yet coordinated with KASLR.
 - A negative W^X/NX fault test (deliberately faulting) builds on the recoverable

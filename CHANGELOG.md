@@ -271,6 +271,16 @@ All notable changes are documented here. The format follows
   0, the bitmap's own storage, reserved ranges and MMIO holes all went into
   the pool. A second bitmap now records the pool, and `free` returns a new
   `FreeError::NotPoolFrame` for anything outside it (host-tested).
+- `unmap` frees each intermediate page table it leaves empty (#64), from the
+  page table up, but never the root or a kernel-half PDPT (shared by every
+  user space); the paging self-test checks the frame count around a map and
+  unmap (it lost three tables before).
+- ELF loading (#132, #133): `elf::parse` refuses an image whose segments
+  cover more than `MAX_IMAGE_PAGES` (4096 pages, 16 MiB) with
+  `ElfError::TooLarge`, before anything is mapped, so a hostile image cannot
+  drain the frame allocator first. The per-page copy plan moves into `elf`
+  as `Segment::load_plan`, host-tested with segments that start mid-page,
+  straddle a page, and mix file bytes with bss; `map_image` follows it.
 
 ## [0.3.0] - 2026-10-28
 

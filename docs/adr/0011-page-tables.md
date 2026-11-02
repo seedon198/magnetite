@@ -55,8 +55,9 @@ understands huge-page entries (so it reads inherited mappings correctly) but
   mapping - an accepted, time-boxed gap, not the end state.
 - The walker depends on the HHDM being present (it is, from Limine) and
   correct; this is already a load-bearing assumption of the frame allocator.
-- `unmap` clears leaf entries but does **not** yet reclaim now-empty
-  intermediate tables; reclaiming them is a future refinement.
+- `unmap` clears the leaf and then frees each intermediate table it leaves
+  empty, from the page table up (#64). It never frees the root, or a
+  kernel-half PDPT, whose top-level entry every user space copies.
 - Pure entry/flag/address math lives in the `page-table` crate
   (`#![forbid(unsafe_code)]`, host-tested); the `unsafe` walk and the `CR3` /
   `invlpg` instructions live in `hal::paging`.
