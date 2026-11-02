@@ -151,6 +151,11 @@ All notable changes are documented here. The format follows
   `SYSENTER` MSRs are zeroed so `sysenter` faults in ring 3. The user-mode demo
   gains two tasks that try each path and must die by `#GP` and by `#GP` or
   `#UD`.
+- The IDT's `global_asm!` switched to `.rodata` for its stub table and never
+  switched back, so asm the compiler placed after it in the same codegen unit
+  (the syscall and ring-3 entry stubs) could land in non-executable `.rodata`
+  and fault on first use, depending on how the build was partitioned. It now
+  uses `.pushsection`/`.popsection`.
 
 ## [0.3.0] - 2026-10-28
 
