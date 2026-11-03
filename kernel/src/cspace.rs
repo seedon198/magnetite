@@ -156,14 +156,23 @@ impl Registry {
     }
 
     /// Unregister the emptied CNode `c` and detach every thread from it.
-    fn unregister(&mut self, c: u16) {
+    /// Returns those threads, one bit each, to be stopped.
+    fn unregister(&mut self, c: u16) -> u64 {
         debug_assert!(self.space(c).iter().next().is_none());
         self.cnodes[usize::from(c)] = None;
-        for of in &mut self.of {
+        let mut detached = 0;
+        for (t, of) in self.of.iter_mut().enumerate() {
             if *of == Some(c) {
                 *of = None;
+                detached |= 1 << t;
             }
         }
+        detached
+    }
+
+    /// Detach thread `t` from its capability space.
+    pub fn detach(&mut self, t: ThreadId) {
+        self.of[t.0] = None;
     }
 
     /// The first capability in any registered CNode naming an object stored
@@ -271,14 +280,19 @@ impl Dying {
     /// capability records, then destroy what it was the last capability to.
     /// A CNode is queued to be emptied; an AddressSpace frees its ASID;
     /// anything else goes to `ipc::destroy`.
-    fn settle(&mut self, ipc: &mut Ipc, r: &Registry, d: &Deleted<ObjectRef>) {
+    fn settle(&mut self, ipc: &mut Ipc, r: &mut Registry, d: &Deleted<ObjectRef>) {
         crate::vspace::unmap(&d.cap, crate::ipc::hhdm());
         if d.last && d.cap.object.kind == ObjectKind::AddressSpace {
+            // Threads running in it stop first (ADR 0023).
+            crate::thread::stop_space_users(ipc, d.cap.object);
             crate::vspace::free(d.cap.object);
             return;
         }
         if d.last && d.cap.object.kind == ObjectKind::Thread {
-            crate::thread::unbind_object(d.cap.object);
+            if let Some(t) = crate::thread::of_object(d.cap.object) {
+                r.detach(t);
+            }
+            crate::thread::unbind_object(ipc, d.cap.object);
             return;
         }
         if !d.last || d.cap.object.kind != ObjectKind::CNode {
@@ -319,7 +333,13 @@ impl Dying {
                 self.settle(ipc, r, &d);
             }
         }
-        r.unregister(c);
+        // Threads whose capability space this was stop.
+        let mut detached = r.unregister(c);
+        while detached != 0 {
+            let t = ThreadId(detached.trailing_zeros() as usize);
+            detached &= detached - 1;
+            crate::thread::stop(ipc, t);
+        }
     }
 }
 

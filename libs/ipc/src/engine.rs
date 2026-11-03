@@ -340,6 +340,70 @@ impl Ipc {
         }
     }
 
+    /// Whether `t` is on an endpoint or Notification queue.
+    #[must_use]
+    pub fn queued(&self, t: ThreadId) -> bool {
+        matches!(
+            self.t[t.0].state,
+            State::Sending(_) | State::Receiving { .. } | State::Waiting
+        )
+    }
+
+    /// Stop thread `t` wherever it is in IPC
+    /// ([ADR 0023](../../docs/adr/0023-user-threads-and-address-spaces.md)):
+    /// take it off the endpoint or Notification queue it waits on, which the
+    /// caller passes as `queue`; out of the reply slot of the receiver that
+    /// took its `Call`, so that receiver's `Reply` fails with `NoReplySlot`;
+    /// and wake a caller waiting in its own reply slot with `PeerExited`. Its
+    /// state and any pending result are cleared.
+    pub fn stop(&mut self, t: ThreadId, queue: Option<&mut EndpointQueue>) -> Outcome {
+        let mut out = Outcome::new(Effect::Done);
+        if let Some(caller) = self.t[t.0].reply_to.take() {
+            self.t[caller.0].state = State::Idle;
+            self.t[caller.0].result = Some(Err(IpcError::PeerExited));
+            out.push(caller);
+        }
+        match self.t[t.0].state {
+            State::Sending(_) | State::Receiving { .. } | State::Waiting => {
+                if let Some(q) = queue {
+                    self.unlink(q, t);
+                }
+            }
+            State::AwaitingReply { .. } => {
+                if let Some(r) = self.t.iter_mut().find(|r| r.reply_to == Some(t)) {
+                    r.reply_to = None;
+                }
+            }
+            State::Idle => {}
+        }
+        self.t[t.0] = Tcb::IDLE;
+        out
+    }
+
+    /// Remove `t` from `q`, wherever it is in the queue.
+    fn unlink(&mut self, q: &mut EndpointQueue, t: ThreadId) {
+        let mut prev: Option<ThreadId> = None;
+        let mut cur = q.head;
+        while let Some(c) = cur {
+            if c == t {
+                let next = self.t[c.0].next.take();
+                match prev {
+                    Some(p) => self.t[p.0].next = next,
+                    None => q.head = next,
+                }
+                if q.tail == Some(t) {
+                    q.tail = prev;
+                }
+                if q.head.is_none() {
+                    q.kind = QueueKind::Empty;
+                }
+                return;
+            }
+            prev = cur;
+            cur = self.t[c.0].next;
+        }
+    }
+
     /// `Reply` (if the reply slot holds a caller), then `Recv`, as one
     /// operation: a server's loop. With an empty reply slot it just receives.
     /// If the reply fails, the receive does not run.

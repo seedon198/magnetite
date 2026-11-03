@@ -154,11 +154,28 @@ A thread stops when it is suspended, when its Thread object, CNode or
 AddressSpace is destroyed, or when it faults. A thread that destroys its own
 Thread object is stopped on its way out of the kernel.
 
+*As built:*
+- **`ThreadResume` always starts the thread at its configured entry.** A
+  suspended or exited thread starts over; it does not continue. That is all
+  starting a server needs, and it leaves no half-run kernel state to resume.
+- **The IPC engine's cancel is `Ipc::stop`.** The kernel's record of what a
+  thread is queued on is cleared whenever it is woken, so it never names a
+  destroyed object.
+- **A running thread that is stopped** switches away when it leaves the
+  syscall. If its Thread object was destroyed, the object's slot is kept, and
+  its stack stays mapped, until another thread runs. The slot matches no
+  object meanwhile, so the memory can be retyped again at once.
+- **The root task's own AddressSpace capability** (step 5) came with this
+  step, so the boot check can run a thread in the root task's own spaces. Its
+  original sits in the root task's keeper CNode. A reap revokes the originals
+  before it tears down the address space the loader built, so by then that
+  space holds only the loader's own pages.
+
 ### 5. The root task starts a task
 
-The root task receives one more capability: its own **AddressSpace**, so it
-can map frames it retypes into its own space and write a program into them.
-The end-to-end boot check:
+The root task receives one more capability, its own **AddressSpace**
+(delivered with step 4), so it can map frames it retypes into its own space
+and write a program into them. The end-to-end boot check:
 - The root task builds a child: a CNode, an AddressSpace with its tables, a
   code frame and a stack frame, and a Thread. It gives the child a badged
   console capability, and starts it.

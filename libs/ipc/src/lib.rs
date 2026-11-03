@@ -1189,6 +1189,80 @@ mod tests {
     }
 
     #[test]
+    fn stop_unlinks_a_queued_thread_and_keeps_the_rest_in_order() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        for (t, label) in [(T1, 1), (T2, 2), (T3, 3)] {
+            ipc.send(
+                &mut NoCaps,
+                &mut ep,
+                t,
+                Rights::SEND,
+                0,
+                msg(label, 0, [0; 4]),
+                None,
+            );
+        }
+        let o = ipc.stop(T2, Some(&mut ep));
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T2), None, "a stopped thread has no result");
+        let o = ipc.stop(T3, Some(&mut ep));
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!((ep.head, ep.tail), (Some(T1), Some(T1)));
+        ipc.recv(&mut NoCaps, &mut ep, T4, Rights::RECV, None);
+        assert_eq!(
+            ipc.take_result(T4).unwrap().unwrap().unwrap().info.label(),
+            1
+        );
+        assert_eq!(ep, EndpointQueue::new());
+        // Stopping the only waiter empties the queue.
+        ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        ipc.stop(T1, Some(&mut ep));
+        assert_eq!(ep, EndpointQueue::new());
+    }
+
+    #[test]
+    fn stop_takes_a_waiter_off_a_notification() {
+        let (mut ipc, mut n) = (Ipc::new(), NotificationQueue::default());
+        ipc.wait(&mut n, T1, Rights::RECV);
+        ipc.wait(&mut n, T2, Rights::RECV);
+        ipc.stop(T1, Some(&mut n.waiters));
+        let o = ipc.signal(&mut n, 0b1);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(ipc.take_result(T1), None);
+    }
+
+    #[test]
+    fn stopping_a_server_wakes_its_caller_and_stopping_a_caller_empties_the_slot() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        let call = |ipc: &mut Ipc, ep: &mut EndpointQueue, c| {
+            ipc.recv(&mut NoCaps, ep, T1, Rights::RECV, None);
+            ipc.call(
+                &mut NoCaps,
+                ep,
+                c,
+                Rights::SEND,
+                0,
+                msg(1, 0, [0; 4]),
+                None,
+                None,
+            );
+            ipc.take_result(T1);
+        };
+        // The server holding a caller is stopped: the caller wakes.
+        call(&mut ipc, &mut ep, T2);
+        let o = ipc.stop(T1, None);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(ipc.take_result(T2), Some(Err(IpcError::PeerExited)));
+        // The caller is stopped: the server's reply slot is empty again.
+        call(&mut ipc, &mut ep, T3);
+        let o = ipc.stop(T3, None);
+        assert_eq!(woken(&o), [None; 4]);
+        let o = ipc.reply(&mut NoCaps, T1, msg(2, 0, [0; 4]), None);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::NoReplySlot)));
+    }
+
+    #[test]
     fn notification_queue_roundtrips_through_state() {
         let q = NotificationQueue {
             signal: 0b1010,

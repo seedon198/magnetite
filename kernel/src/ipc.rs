@@ -167,8 +167,30 @@ fn on_notification(n: ObjectRef, f: impl FnOnce(&mut NotificationQueue) -> Outco
 fn wake(outcome: &Outcome) {
     let mut sched = SCHED.lock();
     for t in outcome.woken() {
+        BLOCKED_ON.lock()[t.0] = None;
         assert!(sched.admit(t), "ipc: a woken thread already runnable");
     }
+}
+
+/// The endpoint or Notification each thread is queued on, while it is. A
+/// leaf lock. Cleared when the thread is woken, so it never names an object
+/// that was destroyed.
+static BLOCKED_ON: SpinLock<[Option<ObjectRef>; ::ipc::MAX_THREADS]> =
+    SpinLock::new([None; ::ipc::MAX_THREADS]);
+
+/// Stop thread `t` wherever it is in IPC (ADR 0023): off the queue it waits
+/// on, out of a reply slot, and with a caller in its own reply slot woken.
+/// Call with `IPC` held; takes `SCHED`.
+pub fn stop(ipc: &mut Ipc, t: ThreadId) {
+    let on = BLOCKED_ON.lock()[t.0].take();
+    let outcome = match on {
+        Some(o) if ipc.queued(t) => match o.kind {
+            ObjectKind::Notification => on_notification(o, |n| ipc.stop(t, Some(&mut n.waiters))),
+            _ => on_endpoint(o, |q| ipc.stop(t, Some(q))),
+        },
+        _ => ipc.stop(t, None),
+    };
+    wake(&outcome);
 }
 
 /// The thread at the head of the queue of `obj`, an Endpoint or a
@@ -194,9 +216,12 @@ pub fn wait(n: CapId) -> Result<u64, IpcError> {
             if cap.object.kind != ObjectKind::Notification {
                 return Err(IpcError::InvalidCap);
             }
-            Ok(on_notification(cap.object, |q| ipc.wait(q, me, cap.rights)))
+            Ok((
+                on_notification(cap.object, |q| ipc.wait(q, me, cap.rights)),
+                cap.object,
+            ))
         })?;
-        finish(me, &outcome)
+        finish(me, &outcome.0, Some(outcome.1))
     })
     .map(|r| r.expect("ipc: a completed wait carries the bits").badge)
 }
@@ -240,6 +265,7 @@ fn invoke(
     hal::cpu::without_interrupts(|| {
         let me = SCHED.lock().current().expect("ipc: a running thread");
         let hhdm = HHDM.load(Ordering::Relaxed);
+        let blocked_on;
         let outcome = {
             let mut ipc = IPC.lock();
             let mut spaces = CSPACES.lock();
@@ -254,6 +280,7 @@ fn invoke(
                 }
                 None => (None, Rights::NONE, 0),
             };
+            blocked_on = obj;
             let mut state = obj.map(|o| hal::object::load_endpoint(o, hhdm));
             let mut queue = state
                 .as_ref()
@@ -265,20 +292,26 @@ fn invoke(
             }
             outcome
         };
-        finish(me, &outcome)
+        finish(me, &outcome, blocked_on)
     })
 }
 
 /// Apply an operation's `outcome` for the current thread `me`: make the
 /// woken threads ready, block and switch away if told to, and return `me`'s
 /// result once it has one. Call with interrupts off and no lock held.
-fn finish(me: ThreadId, outcome: &Outcome) -> Result<Option<Received>, IpcError> {
+fn finish(
+    me: ThreadId,
+    outcome: &Outcome,
+    on: Option<ObjectRef>,
+) -> Result<Option<Received>, IpcError> {
     let next = {
         let mut sched = SCHED.lock();
         for t in outcome.woken() {
+            BLOCKED_ON.lock()[t.0] = None;
             assert!(sched.admit(t), "ipc: woken thread already runnable");
         }
         if outcome.caller == Effect::Block {
+            BLOCKED_ON.lock()[me.0] = on;
             // The boot thread is the idle thread: it never blocks, so the
             // run queue is never empty (#107, ADR 0018).
             assert_ne!(

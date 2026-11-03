@@ -22,10 +22,14 @@ pub fn handle(args: &mut SyscallArgs) -> u64 {
     if let Some(status) = user::debug_syscall(t, args) {
         return status;
     }
-    match dispatch(t, args) {
+    let status = match dispatch(t, args) {
         Ok(()) => 0,
         Err(e) => e.code(),
-    }
+    };
+    // A thread that stopped itself, or whose Thread, CNode or address space
+    // it just destroyed, never returns to ring 3 (ADR 0023).
+    crate::thread::stop_if_requested();
+    status
 }
 
 fn dispatch(t: ThreadId, args: &mut SyscallArgs) -> Result<(), SysError> {

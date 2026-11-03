@@ -218,3 +218,18 @@ pub fn translate(root: ObjectRef, vaddr: u64, hhdm: u64) -> Option<(u64, PageTab
     let e = read(tables[3], table_indices(vaddr)[3], hhdm);
     e.is_present().then(|| (e.addr(), e.flags()))
 }
+
+/// Load address space `root` into `CR3`.
+pub fn activate(root: ObjectRef) {
+    let root = of_kind(root, ObjectKind::AddressSpace);
+    assert!(
+        crate::frame::owns(root, 4096),
+        "vspace: {root:#x} is not allocated table memory"
+    );
+    // SAFETY: `root` is a live AddressSpace object, an allocated page whose
+    // kernel half was copied from the kernel space at retype (`init_root`),
+    // or the root the kernel's loader built; either way it maps the kernel
+    // image, every kernel stack and the HHDM, so the code running now stays
+    // mapped across the switch.
+    unsafe { crate::paging::write_cr3(root) }
+}

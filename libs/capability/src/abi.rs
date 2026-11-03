@@ -259,6 +259,13 @@ pub mod label {
     pub const ADDRESS_SPACE_MAP_FRAME: u32 = 11;
     /// Frame unmap: no arguments.
     pub const FRAME_UNMAP: u32 = 12;
+    /// Thread configure: `mr0` = CNode slot, `mr1` = AddressSpace slot,
+    /// `mr2` = entry, `mr3` = stack pointer.
+    pub const THREAD_CONFIGURE: u32 = 13;
+    /// Thread resume: no arguments.
+    pub const THREAD_RESUME: u32 = 14;
+    /// Thread suspend: no arguments.
+    pub const THREAD_SUSPEND: u32 = 15;
 }
 
 /// The ABI code of an object kind.
@@ -419,6 +426,17 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
             }
         }
         label::FRAME_UNMAP => Method::FrameUnmap,
+        label::THREAD_CONFIGURE => {
+            need(4)?;
+            Method::ThreadConfigure {
+                cnode: slot(mr[0])?,
+                space: slot(mr[1])?,
+                entry: mr[2],
+                stack: mr[3],
+            }
+        }
+        label::THREAD_RESUME => Method::ThreadResume,
+        label::THREAD_SUSPEND => Method::ThreadSuspend,
         _ => return Err(SysError::InvalidSyscall),
     })
 }
@@ -580,6 +598,23 @@ mod tests {
             })
         );
         assert_eq!(msg(label::FRAME_UNMAP, 0, [0; 4]), Ok(Method::FrameUnmap));
+        assert_eq!(
+            msg(label::THREAD_CONFIGURE, 4, [1, 5, 0x40_0000, 0x7000]),
+            Ok(Method::ThreadConfigure {
+                cnode: CapId(1),
+                space: CapId(5),
+                entry: 0x40_0000,
+                stack: 0x7000
+            })
+        );
+        assert_eq!(
+            msg(label::THREAD_RESUME, 0, [0; 4]),
+            Ok(Method::ThreadResume)
+        );
+        assert_eq!(
+            msg(label::THREAD_SUSPEND, 0, [0; 4]),
+            Ok(Method::ThreadSuspend)
+        );
         for size in [0, 0x1800] {
             assert_eq!(
                 msg(label::UNTYPED_SPLIT, 2, [size, 4, 0, 0]),
@@ -600,7 +635,7 @@ mod tests {
     #[test]
     fn unknown_label_is_invalid_syscall() {
         assert_eq!(msg(0, 4, [0; 4]), Err(SysError::InvalidSyscall));
-        assert_eq!(msg(13, 4, [0; 4]), Err(SysError::InvalidSyscall));
+        assert_eq!(msg(16, 4, [0; 4]), Err(SysError::InvalidSyscall));
     }
 
     #[test]

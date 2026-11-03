@@ -68,6 +68,9 @@ the result in the message registers.
 | 10 | `AddressSpaceMapTable` | AddressSpace (`MAP`) | `mr0` PageTable slot, `mr1` vaddr | none |
 | 11 | `AddressSpaceMapFrame` | AddressSpace (`MAP`) | `mr0` Frame slot, `mr1` vaddr, `mr2` rights | none |
 | 12 | `FrameUnmap` | Frame (`MAP`) | none | none |
+| 13 | `ThreadConfigure` | Thread (`WRITE`) | `mr0` CNode slot, `mr1` AddressSpace slot, `mr2` entry, `mr3` stack pointer | none |
+| 14 | `ThreadResume` | Thread (`WRITE`) | none | none |
+| 15 | `ThreadSuspend` | Thread (`WRITE`) | none | none |
 
 - A CNode method works on the CNode the invoked capability names: a
   destination slot, and the slot a delete or revoke names, are there, while a
@@ -90,6 +93,12 @@ the result in the message registers.
   starts unmapped. Deleting a Frame or PageTable capability undoes its
   mapping. PageTable capabilities cannot be copied, and Frame and PageTable
   capabilities cannot be minted.
+- **Threads** (ADR 0023): `ThreadConfigure` binds a stopped Thread to a CNode
+  as its capability space and an AddressSpace, with a user entry and stack
+  pointer. `ThreadResume` starts it at that entry, even if it ran before.
+  `ThreadSuspend` stops it wherever it is, taking it off any queue it waits
+  on. Destroying its Thread, CNode or AddressSpace stops it too; a thread
+  that destroys its own never returns to ring 3.
 - `UntypedSplit` carves a child Untyped of whole pages from the region and
   installs its capability, derived from the parent's. Its first 64 bytes hold
   its control block, so a page-aligned object retyped from it starts on its
@@ -141,8 +150,9 @@ Limine boot module. It starts with a 64-slot CNode holding exactly:
 |---|---|---|
 | 0 | empty, always | |
 | 1 | its own CNode | `READ`, `WRITE` |
-| 2 | 64 KiB of Untyped memory | `RETYPE` |
+| 2 | 128 KiB of Untyped memory | `RETYPE` |
 | 3 | the console endpoint, badge 1 | `SEND` only |
+| 5 | its own address space | `MAP`, `READ` |
 
 It prints through the **console server**, a kernel thread that receives on the
 console endpoint: each `Call` carries up to 32 bytes (label = byte count,
