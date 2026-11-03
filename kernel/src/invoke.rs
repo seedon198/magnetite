@@ -6,8 +6,8 @@
 use ::ipc::Ipc;
 use capability::abi::kind_code;
 use capability::{
-    mdb, CapError, CapId, InvokeError, InvokeOk, Method, ObjectKind, SlotStore, SysError,
-    MSG_REGISTERS,
+    cnode_bytes, mdb, slot_align, CapError, CapId, InvokeError, InvokeOk, Method, ObjectKind,
+    SlotStore, SysError, MSG_REGISTERS,
 };
 use sched::ThreadId;
 
@@ -21,8 +21,9 @@ use crate::cspace::{self, Registry};
 /// destroys each object whose last capability it removes. Call with `IPC`
 /// and `CSPACES` held (`ipc::with_caps`).
 ///
-/// CNode methods act on the acting CNode `cnode`: [`invoke_current`] only
-/// lets a task name its own CNode.
+/// A CNode method addresses two CNodes: a `src` slot is in the acting CNode
+/// `cnode`, and a `dst` slot, or the slot a delete or revoke names, is in the
+/// CNode the invoked capability names (ADR 0023).
 pub fn invoke(
     ipc: &mut Ipc,
     reg: &mut Registry,
@@ -37,10 +38,15 @@ pub fn invoke(
     let at = slot(reg, invoked)?;
     let cap = reg.cap(at).map_err(InvokeError::Cap)?;
     method.authorize(&cap)?;
+    // The CNode a CNode method's destination slots are in.
+    let target = |reg: &Registry, id| {
+        let c = reg.index_of(cap.object).ok_or(InvokeError::Unsupported)?;
+        reg.slot_in(c, id).map_err(InvokeError::Cap)
+    };
 
     match method {
         Method::CNodeCopy { src, dst, rights } => {
-            let (src, dst) = (slot(reg, src)?, slot(reg, dst)?);
+            let (src, dst) = (slot(reg, src)?, target(reg, dst)?);
             mdb::copy(reg, src, dst, rights).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
@@ -50,22 +56,22 @@ pub fn invoke(
             rights,
             badge,
         } => {
-            let (src, dst) = (slot(reg, src)?, slot(reg, dst)?);
+            let (src, dst) = (slot(reg, src)?, target(reg, dst)?);
             mdb::mint(reg, src, dst, rights, badge).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeMove { src, dst } => {
-            let (src, dst) = (slot(reg, src)?, slot(reg, dst)?);
+            let (src, dst) = (slot(reg, src)?, target(reg, dst)?);
             mdb::move_entry(reg, src, dst).map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeDelete { id } => {
-            let id = slot(reg, id)?;
+            let id = target(reg, id)?;
             cspace::delete(ipc, reg, id).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeRevoke { id } => {
-            let id = slot(reg, id)?;
+            let id = target(reg, id)?;
             if cspace::revoke(ipc, reg, id).map_err(InvokeError::Cap)? {
                 Ok(InvokeOk::Done)
             } else {
@@ -93,6 +99,32 @@ pub fn invoke(
             let obj = ObjectRef::new(kind, base);
             mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL))
                 .map_err(|e| InvokeError::Cap(e.into()))?;
+            Ok(InvokeOk::Created(obj))
+        }
+        Method::UntypedRetypeCNode { slots, dst } => {
+            let dst = slot(reg, dst)?;
+            if reg.get(dst).is_some() {
+                return Err(InvokeError::Cap(CapError::Occupied));
+            }
+            // Refuse before taking memory: a full registry cannot hold it.
+            if reg.is_full() {
+                return Err(InvokeError::OutOfMemory);
+            }
+            let slots = usize::try_from(slots).map_err(|_| InvokeError::Unsupported)?;
+            let mut ut = hal::object::load_untyped(cap.object, hhdm);
+            let (size, align) = (cnode_bytes(slots) as u64, slot_align() as u64);
+            let base = hal::object::retype(&mut ut, size, align, 1, hhdm)
+                .ok_or(InvokeError::OutOfMemory)?;
+            hal::object::store_untyped(cap.object, hhdm, ut);
+            let obj = ObjectRef::new(ObjectKind::CNode, base);
+            let space = hal::object::cnode_cap_space(obj, slots, hhdm);
+            let c = reg
+                .register(obj, space)
+                .expect("invoke: the registry had room");
+            if let Err(e) = mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL)) {
+                cspace::clear(ipc, reg, c);
+                return Err(InvokeError::Cap(e.into()));
+            }
             Ok(InvokeOk::Created(obj))
         }
         Method::UntypedSplit { size, dst } => {
@@ -135,9 +167,6 @@ pub fn invoke_current(
         let c = reg.of(t).ok_or(SysError::InvalidCap)?;
         let cap = reg.lookup(t, slot).map_err(|_| SysError::InvalidCap)?;
         method.authorize(&cap)?;
-        if method.target_kind() == ObjectKind::CNode && cap.object != reg.object(c) {
-            return Err(SysError::Unsupported);
-        }
         Ok(match invoke(ipc, reg, c, slot, method, hhdm)? {
             InvokeOk::Done | InvokeOk::Created(_) => [0; MSG_REGISTERS],
             InvokeOk::Phys(_) => [kind_code(ObjectKind::Frame), hal::paging::PAGE, 0, 0],

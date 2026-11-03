@@ -910,7 +910,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
             r.cap(weak_at).unwrap(),
             r.entry(weak_at).unwrap().link.prev == Some(ep_at),
         );
-        r.remove(c, |d| ipc::destroy(ipc, d));
+        cspace::clear(ipc, r, c);
         found
     });
     // The space is gone with the registry entry, so its storage may be freed.
@@ -1084,7 +1084,7 @@ fn demo_invoke(boot_info: &BootInfo) {
                 frame_phys
             )))
         );
-        r.remove(c, |d| ipc::destroy(ipc, d));
+        cspace::clear(ipc, r, c);
     });
 
     info!(

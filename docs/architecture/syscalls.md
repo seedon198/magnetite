@@ -61,14 +61,18 @@ the result in the message registers.
 | 3 | `CNodeMove` | CNode (`WRITE`) | `mr0` src, `mr1` dst | none |
 | 4 | `CNodeDelete` | CNode (`WRITE`) | `mr0` slot | none |
 | 5 | `FrameIdentify` | Frame (`READ`) | none | `mr0` kind, `mr1` size |
-| 6 | `UntypedRetype` | Untyped (`RETYPE`) | `mr0` kind, `mr1` count (1), `mr2` dst | none |
+| 6 | `UntypedRetype` | Untyped (`RETYPE`) | `mr0` kind, `mr1` count (1), `mr2` dst, `mr3` slots (a CNode) | none |
 | 7 | `NotificationSignal` | Notification (`SEND`) | `mr0` bits | none |
 | 8 | `CNodeRevoke` | CNode (`WRITE`) | `mr0` slot | none |
 | 9 | `UntypedSplit` | Untyped (`RETYPE`) | `mr0` size in bytes (whole pages), `mr1` dst | none |
 
-- A CNode method acts on the caller's own capability space, and only through
-  a capability to the caller's own CNode.
-- A retype creates one Frame, Endpoint or Notification.
+- A CNode method works on the CNode the invoked capability names: a
+  destination slot, and the slot a delete or revoke names, are there, while a
+  source slot is in the caller's own space. Through a capability to its own
+  CNode a task manages its own slots; through one to another CNode it fills
+  or clears that one ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)).
+- A retype creates one Frame, Endpoint or Notification, or one CNode, whose
+  slot count (a power of two, at most 256) is `mr3`.
 - `UntypedSplit` carves a child Untyped of whole pages from the region and
   installs its capability, derived from the parent's. Its first 64 bytes hold
   its control block, so a page-aligned object retyped from it starts on its

@@ -84,7 +84,10 @@ only attenuate, and a slot fills only when empty.
 
 A delete or revoke can wake threads, so it runs under the `IPC` lock and then
 `CSPACES` (`ipc::with_caps`). A CNode leaves the registry only after every
-capability in it is deleted.
+capability in it is deleted. A task may retype a CNode from its Untyped
+(up to 256 slots), and destroying one, when its last capability goes, empties
+it the same way: what was last in it is destroyed in turn, in a loop rather
+than by recursion ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)).
 
 ## Untyped memory and retype
 

@@ -57,6 +57,14 @@ All notable changes are documented here. The format follows
   takes it back. Verified in ring 3: an 8 KiB child holds one frame, refuses
   a second, and holds one again after it is revoked.
 
+- **CNodes from Untyped** (#162, [ADR 0023](docs/adr/0023-user-threads-and-address-spaces.md)
+  step 1): `UntypedRetype` makes a CNode of a power-of-two slot count up to
+  256, registered for the CNode methods. Destroying a CNode empties it and
+  destroys what was last in it, in a loop over dying CNodes. CNode methods
+  now address the invoked CNode, so a task can fill a CNode it made.
+  Verified in ring 3: a copy lands in the new CNode and not the task's own,
+  and the CNode is destroyed with a capability still inside.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a

@@ -18,6 +18,8 @@ const ENDPOINT: u64 = 7;
 /// The slots of a child Untyped root splits off, and a frame from it.
 const CHILD: u64 = 8;
 const CHILD_FRAME: u64 = 9;
+/// The slot of a CNode root retypes.
+const KID: u64 = 10;
 /// The slot root copies its console capability into, then revokes.
 const COPY: u64 = 6;
 
@@ -167,6 +169,40 @@ fn main() -> ! {
     );
     let empty = sys::revoke(sys::CNODE, COPY);
     ok &= check("revoke empty slot 6", empty, Err(SysError::CapEmpty));
+
+    // A CNode of its own making (ADR 0023): copies into it land there, not
+    // in root's space, and destroying it with a capability inside is fine.
+    let cnode = kind_code(ObjectKind::CNode);
+    let odd = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[cnode, 1, KID, 12]);
+    ok &= check("retype a 12-slot CNode", odd, Err(SysError::Unsupported));
+    let kid = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[cnode, 1, KID, 16]);
+    ok &= check("retype a 16-slot CNode into slot 10", kid, Ok(()));
+    let into = [CONSOLE, 5, send];
+    ok &= check(
+        "copy the console capability into its slot 5",
+        sys::invoke(KID, label::CNODE_COPY, &into),
+        Ok(()),
+    );
+    let mine = sys::invoke(5, label::NOTIFICATION_SIGNAL, &[1]);
+    ok &= check(
+        "root's own slot 5 stays empty",
+        mine,
+        Err(SysError::InvalidCap),
+    );
+    let twice = sys::invoke(KID, label::CNODE_COPY, &into);
+    ok &= check(
+        "copy into its slot 5 again",
+        twice,
+        Err(SysError::CapOccupied),
+    );
+    let del = sys::invoke(KID, label::CNODE_DELETE, &[5]);
+    ok &= check("delete its slot 5", del, Ok(()));
+    let del = sys::invoke(KID, label::CNODE_DELETE, &[5]);
+    ok &= check("delete its slot 5 again", del, Err(SysError::CapEmpty));
+    let refill = sys::invoke(KID, label::CNODE_COPY, &into);
+    ok &= check("copy into its slot 5 once more", refill, Ok(()));
+    let gone = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[KID]);
+    ok &= check("delete the CNode, a capability still inside", gone, Ok(()));
 
     // Malformed console messages are clamped and repaired, never fatal: a
     // label of 200 (32 bytes are taken) and a byte that is not UTF-8.

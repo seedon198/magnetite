@@ -12,7 +12,16 @@ use crate::object::{ObjectKind, ObjectRef};
 use crate::space::{CapError, CapId};
 use crate::{Capability, Rights};
 
+/// The most slots a CNode retyped by a task may have.
+pub const MAX_CNODE_SLOTS: u64 = 256;
+
 /// A method invoked on a capability. Each variant targets one object kind.
+///
+/// The CNode methods address two CNodes: a `src` slot is in the caller's own
+/// capability space, while a `dst` slot, and the slot a delete or revoke
+/// names, are in the CNode the invoked capability names. With a capability
+/// to its own CNode a task manages its own slots; with one to another CNode
+/// it fills or clears that one (ADR 0023).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     /// Copy a capability `src` → `dst` within the CNode, attenuating to
@@ -67,6 +76,15 @@ pub enum Method {
         /// How many to create.
         count: u64,
         /// Slot to install the (first) new capability into.
+        dst: CapId,
+    },
+    /// Retype this Untyped into a CNode of `slots` slots (a power of two, at
+    /// most [`MAX_CNODE_SLOTS`]), installing its capability at `dst` in the
+    /// acting cap space.
+    UntypedRetypeCNode {
+        /// Slots in the new CNode.
+        slots: u64,
+        /// Slot to install the new CNode's capability into.
         dst: CapId,
     },
     /// Split a child Untyped of `size` bytes (a whole number of pages) from
@@ -127,7 +145,9 @@ impl Method {
             | Method::CNodeDelete { .. }
             | Method::CNodeRevoke { .. } => ObjectKind::CNode,
             Method::FrameIdentify => ObjectKind::Frame,
-            Method::UntypedRetype { .. } | Method::UntypedSplit { .. } => ObjectKind::Untyped,
+            Method::UntypedRetype { .. }
+            | Method::UntypedRetypeCNode { .. }
+            | Method::UntypedSplit { .. } => ObjectKind::Untyped,
             Method::NotificationSignal { .. } => ObjectKind::Notification,
         }
     }
@@ -143,7 +163,9 @@ impl Method {
             | Method::CNodeDelete { .. }
             | Method::CNodeRevoke { .. } => Rights::WRITE,
             Method::FrameIdentify => Rights::READ,
-            Method::UntypedRetype { .. } | Method::UntypedSplit { .. } => Rights::RETYPE,
+            Method::UntypedRetype { .. }
+            | Method::UntypedRetypeCNode { .. }
+            | Method::UntypedSplit { .. } => Rights::RETYPE,
             Method::NotificationSignal { .. } => Rights::SEND,
         }
     }
