@@ -19,6 +19,21 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The capability derivation tree** (#156,
+  [ADR 0020](docs/adr/0020-capability-derivation-and-revoke.md)): every
+  capability records the one it was derived from (copy, mint, retype and IPC
+  transfer), across every CNode, through a pure, host-tested mapping database
+  (`capability::mdb`) and a kernel CNode registry.
+- **Revoke**: the `CNodeRevoke` method deletes everything derived from a
+  capability, in rounds of at most 64 deletions that return the new `Again`
+  error (`sys::revoke` loops). Deleting the last capability to an Endpoint
+  destroys it, waking every thread queued on it with the new `Revoked` error.
+  Verified in QEMU: a revoke in ring 3 takes back a copy of the root task's
+  console capability, and a server blocked on an endpoint wakes with
+  `Revoked` once its last capability goes.
+
 ## [0.4.0] - 2026-11-02
 
 M4: scheduling and userspace. Threads with a context switch, round-robin

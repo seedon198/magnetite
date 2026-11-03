@@ -93,7 +93,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 ## M5: User servers
 
-**Status: in progress** (epic #20). Revoke (#156) comes first: every capability now records its place in the derivation tree, and revoke itself is next.
+**Status: in progress** (epic #20). Revoke (#156) comes first: every capability records its place in the derivation tree, and `CNodeRevoke` and destroy on the last capability work. Reaping a task through revoke is next.
 
 - [ ] Capability revoke: the derivation tree of [ADR 0020](adr/0020-capability-derivation-and-revoke.md) (#156), before any `GRANT` path between tasks
 - [ ] Notification wait, Untyped splitting, user-created `Thread` and `AddressSpace` objects (#162)

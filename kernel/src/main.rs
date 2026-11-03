@@ -895,7 +895,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
         Rights::ALL,
     );
     let capacity = space.capacity();
-    let (full, weak, child_of) = cspace::with(|r| {
+    let (full, weak, child_of) = ipc::with_caps(|ipc, r| {
         let c = r
             .register(ObjectRef::new(ObjectKind::CNode, cnode_phys), space)
             .expect("caps: the CNode registry is full");
@@ -909,7 +909,7 @@ fn demo_capabilities(boot_info: &BootInfo) {
             r.cap(weak_at).unwrap(),
             r.entry(weak_at).unwrap().link.prev == Some(ep_at),
         );
-        r.remove(c);
+        r.remove(c, |d| ipc::destroy(ipc, d));
         found
     });
 
@@ -972,7 +972,7 @@ fn demo_invoke(boot_info: &BootInfo) {
 
     let space = hal::object::cnode_cap_space(cnode_phys, SLOTS, hhdm);
     let (ut_id, nt_id) = (CapId(0), CapId(1));
-    cspace::with(|r| {
+    ipc::with_caps(|ipc, r| {
         let c = r
             .register(ObjectRef::new(ObjectKind::CNode, cnode_phys), space)
             .expect("invoke: the CNode registry is full");
@@ -986,6 +986,7 @@ fn demo_invoke(boot_info: &BootInfo) {
 
         // 1) Retype a Frame from the Untyped, through invoke.
         let created = invoke::invoke(
+            ipc,
             r,
             c,
             ut_id,
@@ -1005,7 +1006,7 @@ fn demo_invoke(boot_info: &BootInfo) {
         assert_eq!((link.prev, link.depth), (Some(SlotRef::new(c, 0)), 1));
 
         // 2) Identify the new Frame.
-        let identified = invoke::invoke(r, c, CapId(5), Method::FrameIdentify, hhdm);
+        let identified = invoke::invoke(ipc, r, c, CapId(5), Method::FrameIdentify, hhdm);
         assert_eq!(identified, Ok(InvokeOk::Phys(frame_phys)));
 
         // 3) Rights denied: a copy of the Untyped cap without RETYPE cannot retype.
@@ -1017,10 +1018,11 @@ fn demo_invoke(boot_info: &BootInfo) {
         let cnode_cap = Capability::new(r.object(c), Rights::WRITE);
         mdb::insert_root(r, SlotRef::new(c, 15), cnode_cap).unwrap();
         assert_eq!(
-            invoke::invoke(r, c, CapId(15), copy, hhdm),
+            invoke::invoke(ipc, r, c, CapId(15), copy, hhdm),
             Ok(InvokeOk::Done)
         );
         let denied = invoke::invoke(
+            ipc,
             r,
             c,
             CapId(6),
@@ -1035,6 +1037,7 @@ fn demo_invoke(boot_info: &BootInfo) {
 
         // 4) Signal the Notification, then confirm the bits landed.
         let _ = invoke::invoke(
+            ipc,
             r,
             c,
             nt_id,
@@ -1045,10 +1048,26 @@ fn demo_invoke(boot_info: &BootInfo) {
             hal::object::notification_pending(notif_phys, hhdm) & 0b1010,
             0b1010
         );
-        r.remove(c);
+
+        // 5) Revoke the Untyped: the Frame retyped from it and the copy of
+        // it both go, and the Untyped's own capability stays.
+        let revoke = Method::CNodeRevoke { id: ut_id };
+        assert_eq!(
+            invoke::invoke(ipc, r, c, CapId(15), revoke, hhdm),
+            Ok(InvokeOk::Done)
+        );
+        let gone = [5, 6].map(|i| r.entry(SlotRef::new(c, i)).is_none());
+        assert_eq!(gone, [true, true], "invoke: revoke left a descendant");
+        assert!(
+            r.entry(SlotRef::new(c, 0)).is_some(),
+            "invoke: revoke took the Untyped"
+        );
+        r.remove(c, |d| ipc::destroy(ipc, d));
     });
 
-    info!("invoke: retype->frame, identify, rights-denied, and signal all behaved correctly");
+    info!(
+        "invoke: retype->frame, identify, rights-denied, signal and revoke all behaved correctly"
+    );
 
     hal::frame::free_frame(ctrl);
     hal::frame::free_frame(region);

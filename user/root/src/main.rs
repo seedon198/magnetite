@@ -13,6 +13,8 @@ use sys::{kind_code, label, MessageInfo, ObjectKind, SysError, CONSOLE, UNTYPED}
 
 /// The slot root retypes a Notification into.
 const NOTE: u64 = 4;
+/// The slot root copies its console capability into, then revokes.
+const COPY: u64 = 6;
 
 /// A line built on the stack, then written to the console.
 struct Line {
@@ -109,6 +111,22 @@ fn main() -> ! {
         grant,
         Err(SysError::NoGrant),
     );
+
+    // Revoke takes back what was derived (ADR 0020): a copy of the console
+    // capability goes, and the capability it was copied from stays.
+    let send = u64::from(sys::Rights::SEND.bits());
+    let copy = sys::invoke(sys::CNODE, label::CNODE_COPY, &[CONSOLE, COPY, send]);
+    ok &= check("copy the console capability into slot 6", copy, Ok(()));
+    ok &= check("revoke slot 3", sys::revoke(sys::CNODE, CONSOLE), Ok(()));
+    let plain = MessageInfo::new(0, 0, 0);
+    let gone = sys::send(COPY, plain, [0; 4], sys::NULL);
+    ok &= check(
+        "send through the revoked copy",
+        gone,
+        Err(SysError::InvalidCap),
+    );
+    let empty = sys::revoke(sys::CNODE, COPY);
+    ok &= check("revoke empty slot 6", empty, Err(SysError::CapEmpty));
 
     // Malformed console messages are clamped and repaired, never fatal: a
     // label of 200 (32 bytes are taken) and a byte that is not UTF-8.

@@ -101,6 +101,41 @@ pub fn exit_thread(t: ThreadId) -> Outcome {
     IPC.lock().exit(t)
 }
 
+/// Run `f` on the IPC state and the CNode registry, with interrupts off and
+/// `IPC` then `CSPACES` held: the locks for any capability operation that
+/// may destroy an object and so wake threads blocked on it (ADR 0020).
+pub fn with_caps<R>(f: impl FnOnce(&mut Ipc, &mut Registry) -> R) -> R {
+    hal::cpu::without_interrupts(|| {
+        let mut ipc = IPC.lock();
+        let mut reg = CSPACES.lock();
+        f(&mut ipc, &mut reg)
+    })
+}
+
+/// A capability was deleted: if it was the last to its object, destroy the
+/// object (ADR 0020). An Endpoint wakes every thread queued on it with
+/// `Revoked`. Nothing else holds kernel state to tear down yet: a
+/// Notification has no waiters until waits exist, and CNode, Untyped, Frame
+/// and Thread memory is reclaimed by the task reap.
+///
+/// Call with `IPC` and `CSPACES` held (see [`with_caps`]); takes `SCHED`.
+pub fn destroy(ipc: &mut Ipc, deleted: &mdb::Deleted<ObjectRef>) {
+    let obj = deleted.cap.object;
+    if !deleted.last || obj.kind != ObjectKind::Endpoint {
+        return;
+    }
+    let hhdm = HHDM.load(Ordering::Relaxed);
+    let mut state = hal::object::load_endpoint(obj.phys, hhdm);
+    let mut queue = EndpointQueue::load(&state);
+    let outcome = ipc.destroy_endpoint(&mut queue);
+    queue.store(&mut state);
+    hal::object::store_endpoint(obj.phys, hhdm, state);
+    let mut sched = SCHED.lock();
+    for t in outcome.woken() {
+        assert!(sched.admit(t), "ipc: a revoked waiter already runnable");
+    }
+}
+
 /// The capability spaces as the engine sees them.
 struct Spaces<'a>(&'a mut Registry);
 
@@ -301,6 +336,41 @@ pub fn demo(boot_info: &BootInfo) {
         "ipc: a refused transfer moved a capability"
     );
     crate::info!("ipc: call/reply, badge, capability transfer and GRANT enforcement verified");
+
+    // The server now waits on the endpoint again. Revoking the original takes
+    // back every capability derived from it, the server's included; deleting
+    // the original then destroys the endpoint, which wakes the server with
+    // `Revoked` (ADR 0020).
+    let waiting = || {
+        with_caps(|_, _| {
+            let q = EndpointQueue::load(&hal::object::load_endpoint(ep.phys, hhdm));
+            q.head == Some(SERVER)
+        })
+    };
+    while !waiting() {
+        crate::yield_now();
+    }
+    let derived = [(SERVER, 0), (CLIENT, 0), (CLIENT, 1)];
+    with_caps(|ipc, r| {
+        while !cspace::revoke(ipc, r, origin).expect("ipc: revoke the original") {}
+        for (t, id) in derived {
+            assert_eq!(
+                r.lookup(t, CapId(id)),
+                Err(CapError::Empty),
+                "ipc: revoke left a derived endpoint capability"
+            );
+        }
+        assert_eq!(
+            IPC_DONE.load(Ordering::Acquire),
+            2,
+            "ipc: woken before the last capability went"
+        );
+        cspace::delete(ipc, r, origin).expect("ipc: delete the original");
+    });
+    while IPC_DONE.load(Ordering::Acquire) < 3 {
+        crate::yield_now();
+    }
+    crate::info!("ipc: revoke took back derived capabilities; a waiter on a destroyed endpoint woke with Revoked");
 }
 
 extern "C" fn ipc_server() -> ! {
@@ -326,6 +396,14 @@ extern "C" fn ipc_server() -> ! {
         r.info.label(),
         r.badge,
         r.info.caps()
+    );
+    IPC_DONE.fetch_add(1, Ordering::Release);
+    // Wait once more: the demo destroys the endpoint under us.
+    let revoked = recv(CapId(0), None);
+    assert_eq!(
+        revoked,
+        Err(IpcError::Revoked),
+        "ipc: a destroyed endpoint's waiter"
     );
     IPC_DONE.fetch_add(1, Ordering::Release);
     crate::exit_current()

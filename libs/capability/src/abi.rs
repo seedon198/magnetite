@@ -150,6 +150,11 @@ pub enum SysError {
     InvalidCap = 18,
     /// An unknown syscall number or method label, or malformed arguments.
     InvalidSyscall = 19,
+    /// A revoke stopped after its budget of deletions with more to do; invoke
+    /// it again to continue (ADR 0020).
+    Again = 20,
+    /// The endpoint the caller was blocked on was destroyed (ADR 0020).
+    Revoked = 21,
 }
 
 impl SysError {
@@ -184,6 +189,8 @@ impl SysError {
             17 => Unsupported,
             18 => InvalidCap,
             19 => InvalidSyscall,
+            20 => Again,
+            21 => Revoked,
             _ => return None,
         })
     }
@@ -208,6 +215,7 @@ impl From<InvokeError> for SysError {
             InvokeError::Cap(c) => c.into(),
             InvokeError::OutOfMemory => SysError::OutOfMemory,
             InvokeError::Unsupported => SysError::Unsupported,
+            InvokeError::Again => SysError::Again,
         }
     }
 }
@@ -228,6 +236,9 @@ pub mod label {
     pub const UNTYPED_RETYPE: u32 = 6;
     /// Notification signal: `mr0` = bits.
     pub const NOTIFICATION_SIGNAL: u32 = 7;
+    /// CNode revoke: `mr0` = slot. Fails with `Again` while descendants
+    /// remain after its budget.
+    pub const CNODE_REVOKE: u32 = 8;
 }
 
 /// The ABI code of an object kind.
@@ -319,6 +330,10 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
             need(1)?;
             Method::CNodeDelete { id: slot(mr[0])? }
         }
+        label::CNODE_REVOKE => {
+            need(1)?;
+            Method::CNodeRevoke { id: slot(mr[0])? }
+        }
         label::FRAME_IDENTIFY => Method::FrameIdentify,
         label::UNTYPED_RETYPE => {
             need(3)?;
@@ -375,7 +390,7 @@ mod tests {
 
     // ---------------------------------------------------------------- syscall ABI
 
-    const ALL_ERRORS: [SysError; 19] = [
+    const ALL_ERRORS: [SysError; 21] = [
         SysError::MissingRight,
         SysError::NoGrant,
         SysError::TooManyCaps,
@@ -395,6 +410,8 @@ mod tests {
         SysError::Unsupported,
         SysError::InvalidCap,
         SysError::InvalidSyscall,
+        SysError::Again,
+        SysError::Revoked,
     ];
 
     fn msg(label: u32, length: u8, mr: [u64; MSG_REGISTERS]) -> Result<Method, SysError> {
@@ -408,7 +425,7 @@ mod tests {
             assert_eq!(SysError::from_code(e.code()), Some(*e));
         }
         assert_eq!(SysError::from_code(0), None);
-        assert_eq!(SysError::from_code(20), None);
+        assert_eq!(SysError::from_code(22), None);
     }
 
     #[test]
@@ -451,6 +468,10 @@ mod tests {
             Ok(Method::CNodeDelete { id: CapId(4) })
         );
         assert_eq!(
+            msg(label::CNODE_REVOKE, 1, [4, 0, 0, 0]),
+            Ok(Method::CNodeRevoke { id: CapId(4) })
+        );
+        assert_eq!(
             msg(label::FRAME_IDENTIFY, 0, [0; 4]),
             Ok(Method::FrameIdentify)
         );
@@ -484,7 +505,7 @@ mod tests {
     #[test]
     fn unknown_label_is_invalid_syscall() {
         assert_eq!(msg(0, 4, [0; 4]), Err(SysError::InvalidSyscall));
-        assert_eq!(msg(8, 4, [0; 4]), Err(SysError::InvalidSyscall));
+        assert_eq!(msg(9, 4, [0; 4]), Err(SysError::InvalidSyscall));
     }
 
     #[test]
@@ -559,5 +580,6 @@ mod tests {
             SysError::from(InvokeError::OutOfMemory),
             SysError::OutOfMemory
         );
+        assert_eq!(SysError::from(InvokeError::Again), SysError::Again);
     }
 }
