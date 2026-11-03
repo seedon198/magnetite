@@ -31,7 +31,7 @@ pub fn invoke(
     method: Method,
     hhdm: u64,
 ) -> Result<InvokeOk, InvokeError> {
-    use capability::{Capability, ObjectRef, Rights};
+    use capability::{Capability, ObjectRef, Rights, Untyped};
 
     let slot = |reg: &Registry, id| reg.slot_in(cnode, id).map_err(InvokeError::Cap);
     let at = slot(reg, invoked)?;
@@ -91,6 +91,24 @@ pub fn invoke(
                 .ok_or(InvokeError::OutOfMemory)?;
             hal::object::store_untyped(cap.object, hhdm, ut);
             let obj = ObjectRef::new(kind, base);
+            mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL))
+                .map_err(|e| InvokeError::Cap(e.into()))?;
+            Ok(InvokeOk::Created(obj))
+        }
+        Method::UntypedSplit { size, dst } => {
+            let dst = slot(reg, dst)?;
+            if reg.get(dst).is_some() {
+                return Err(InvokeError::Cap(CapError::Occupied));
+            }
+            let unit = Untyped::CHILD_UNIT;
+            let mut ut = hal::object::load_untyped(cap.object, hhdm);
+            let base = hal::object::retype(&mut ut, size, unit, 1, hhdm)
+                .ok_or(InvokeError::OutOfMemory)?;
+            let child = Untyped::child(base, size).ok_or(InvokeError::Unsupported)?;
+            hal::object::store_untyped(cap.object, hhdm, ut);
+            // The child's control block heads its own storage.
+            let obj = ObjectRef::new(ObjectKind::Untyped, base);
+            hal::object::store_untyped(obj, hhdm, child);
             mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL))
                 .map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Created(obj))

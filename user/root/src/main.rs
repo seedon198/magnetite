@@ -15,6 +15,9 @@ use sys::{kind_code, label, MessageInfo, ObjectKind, SysError, CONSOLE, UNTYPED}
 const NOTE: u64 = 4;
 /// The slot root retypes an Endpoint into.
 const ENDPOINT: u64 = 7;
+/// The slots of a child Untyped root splits off, and a frame from it.
+const CHILD: u64 = 8;
+const CHILD_FRAME: u64 = 9;
 /// The slot root copies its console capability into, then revokes.
 const COPY: u64 = 6;
 
@@ -106,6 +109,22 @@ fn main() -> ! {
     let endpoint = kind_code(ObjectKind::Endpoint);
     let retype = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[endpoint, 1, ENDPOINT]);
     ok &= check("retype an Endpoint into slot 7", retype, Ok(()));
+    // A child Untyped is a bounded budget (#162): 8 KiB split off holds one
+    // page-aligned frame after its control block, and no more. Revoking the
+    // child takes the frame back and frees its whole region again.
+    let split = sys::invoke(UNTYPED, label::UNTYPED_SPLIT, &[0x2000, CHILD]);
+    ok &= check("split an 8 KiB Untyped into slot 8", split, Ok(()));
+    let first = sys::invoke(CHILD, label::UNTYPED_RETYPE, &[frame, 1, CHILD_FRAME]);
+    ok &= check("retype a frame from it into slot 9", first, Ok(()));
+    let more = sys::invoke(CHILD, label::UNTYPED_RETYPE, &[frame, 1, CHILD_FRAME + 1]);
+    ok &= check(
+        "retype a second frame from it",
+        more,
+        Err(SysError::OutOfMemory),
+    );
+    ok &= check("revoke slot 8", sys::revoke(sys::CNODE, CHILD), Ok(()));
+    let again = sys::invoke(CHILD, label::UNTYPED_RETYPE, &[frame, 1, CHILD_FRAME]);
+    ok &= check("retype a frame into slot 9 again", again, Ok(()));
     // More arguments than the ABI carries are refused, not truncated (#135).
     let five = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b10, 0, 0, 0, 0]);
     ok &= check(

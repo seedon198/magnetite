@@ -64,10 +64,15 @@ the result in the message registers.
 | 6 | `UntypedRetype` | Untyped (`RETYPE`) | `mr0` kind, `mr1` count (1), `mr2` dst | none |
 | 7 | `NotificationSignal` | Notification (`SEND`) | `mr0` bits | none |
 | 8 | `CNodeRevoke` | CNode (`WRITE`) | `mr0` slot | none |
+| 9 | `UntypedSplit` | Untyped (`RETYPE`) | `mr0` size in bytes (whole pages), `mr1` dst | none |
 
 - A CNode method acts on the caller's own capability space, and only through
   a capability to the caller's own CNode.
 - A retype creates one Frame, Endpoint or Notification.
+- `UntypedSplit` carves a child Untyped of whole pages from the region and
+  installs its capability, derived from the parent's. Its first 64 bytes hold
+  its control block, so a page-aligned object retyped from it starts on its
+  second page.
 - `CNodeRevoke` deletes every capability derived from the one in the slot,
   keeping that one. It makes at most 64 deletions per call, then fails with
   `Again` if more remain: call it again to continue (`sys::revoke` loops).

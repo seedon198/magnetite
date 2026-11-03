@@ -239,6 +239,9 @@ pub mod label {
     /// CNode revoke: `mr0` = slot. Fails with `Again` while descendants
     /// remain after its budget.
     pub const CNODE_REVOKE: u32 = 8;
+    /// Untyped split: `mr0` = size in bytes (a whole number of pages),
+    /// `mr1` = dst.
+    pub const UNTYPED_SPLIT: u32 = 9;
 }
 
 /// The ABI code of an object kind.
@@ -349,6 +352,16 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
                 kind,
                 count: 1,
                 dst: slot(mr[2])?,
+            }
+        }
+        label::UNTYPED_SPLIT => {
+            need(2)?;
+            if mr[0] == 0 || !mr[0].is_multiple_of(crate::Untyped::CHILD_UNIT) {
+                return Err(SysError::Unsupported);
+            }
+            Method::UntypedSplit {
+                size: mr[0],
+                dst: slot(mr[1])?,
             }
         }
         label::NOTIFICATION_SIGNAL => {
@@ -491,6 +504,19 @@ mod tests {
             msg(label::NOTIFICATION_SIGNAL, 1, [0b101, 0, 0, 0]),
             Ok(Method::NotificationSignal { bits: 0b101 })
         );
+        assert_eq!(
+            msg(label::UNTYPED_SPLIT, 2, [0x2000, 4, 0, 0]),
+            Ok(Method::UntypedSplit {
+                size: 0x2000,
+                dst: CapId(4)
+            })
+        );
+        for size in [0, 0x1800] {
+            assert_eq!(
+                msg(label::UNTYPED_SPLIT, 2, [size, 4, 0, 0]),
+                Err(SysError::Unsupported)
+            );
+        }
     }
 
     #[test]
@@ -505,7 +531,7 @@ mod tests {
     #[test]
     fn unknown_label_is_invalid_syscall() {
         assert_eq!(msg(0, 4, [0; 4]), Err(SysError::InvalidSyscall));
-        assert_eq!(msg(9, 4, [0; 4]), Err(SysError::InvalidSyscall));
+        assert_eq!(msg(10, 4, [0; 4]), Err(SysError::InvalidSyscall));
     }
 
     #[test]
