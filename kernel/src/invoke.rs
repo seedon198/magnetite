@@ -32,7 +32,7 @@ pub fn invoke(
     method: Method,
     hhdm: u64,
 ) -> Result<InvokeOk, InvokeError> {
-    use capability::{Capability, ObjectRef, Rights, Untyped};
+    use capability::{Capability, Mapping, ObjectRef, Rights, Untyped};
 
     let slot = |reg: &Registry, id| reg.slot_in(cnode, id).map_err(InvokeError::Cap);
     let at = slot(reg, invoked)?;
@@ -47,7 +47,7 @@ pub fn invoke(
     match method {
         Method::CNodeCopy { src, dst, rights } => {
             let (src, dst) = (slot(reg, src)?, target(reg, dst)?);
-            mdb::copy(reg, src, dst, rights).map_err(InvokeError::Cap)?;
+            cspace::copy(reg, src, dst, rights).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeMint {
@@ -57,7 +57,7 @@ pub fn invoke(
             badge,
         } => {
             let (src, dst) = (slot(reg, src)?, target(reg, dst)?);
-            mdb::mint(reg, src, dst, rights, badge).map_err(InvokeError::Cap)?;
+            cspace::mint(reg, src, dst, rights, badge).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
         }
         Method::CNodeMove { src, dst } => {
@@ -91,12 +91,25 @@ pub fn invoke(
             if reg.get(dst).is_some() {
                 return Err(InvokeError::Cap(CapError::Occupied));
             }
+            let space = kind == ObjectKind::AddressSpace;
+            if space && (count != 1 || !crate::vspace::has_free()) {
+                return Err(InvokeError::OutOfMemory);
+            }
             // The Untyped capability points at its control block (an `Untyped`).
             let mut ut = hal::object::load_untyped(cap.object, hhdm);
             let base = hal::object::retype(&mut ut, size, align, count, hhdm)
                 .ok_or(InvokeError::OutOfMemory)?;
             hal::object::store_untyped(cap.object, hhdm, ut);
             let obj = ObjectRef::new(kind, base);
+            if space {
+                // A new address space has the kernel half, and an ASID.
+                hal::cpu::without_interrupts(|| {
+                    let kernel = crate::KERNEL_SPACE.lock();
+                    let kernel = kernel.as_ref().expect("invoke: the kernel space");
+                    hal::vspace::init_root(obj, kernel, hhdm);
+                });
+                crate::vspace::alloc(obj).expect("invoke: an ASID was free");
+            }
             mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL))
                 .map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Created(obj))
@@ -127,6 +140,76 @@ pub fn invoke(
             }
             Ok(InvokeOk::Created(obj))
         }
+        Method::AddressSpaceMapTable { table, vaddr } => {
+            let t = slot(reg, table)?;
+            let mut e = reg.entry(t).ok_or(InvokeError::Cap(CapError::Empty))?;
+            if e.cap.object.kind != ObjectKind::PageTable {
+                return Err(InvokeError::WrongObject);
+            }
+            if crate::vspace::mapping(&e.cap).is_some() {
+                return Err(InvokeError::AlreadyMapped);
+            }
+            let (asid, generation) =
+                crate::vspace::of(cap.object).ok_or(InvokeError::Unsupported)?;
+            let level = hal::vspace::install_table(cap.object, vaddr, e.cap.object, hhdm)
+                .map_err(vspace_error)?;
+            let m = Mapping {
+                asid,
+                generation,
+                vpn: vaddr >> 12,
+                level,
+            };
+            e.cap.badge = m.pack().expect("invoke: a user-half mapping packs");
+            reg.set(t, Some(e));
+            Ok(InvokeOk::Done)
+        }
+        Method::AddressSpaceMapFrame {
+            frame,
+            vaddr,
+            rights,
+        } => {
+            let f = slot(reg, frame)?;
+            let mut e = reg.entry(f).ok_or(InvokeError::Cap(CapError::Empty))?;
+            if e.cap.object.kind != ObjectKind::Frame {
+                return Err(InvokeError::WrongObject);
+            }
+            // Within the frame capability's rights, readable, and never both
+            // writable and executable (ADR 0012).
+            let wx = Rights::WRITE | Rights::EXECUTE;
+            if !e.cap.allows(rights) || !rights.contains(Rights::READ) || rights.contains(wx) {
+                return Err(InvokeError::Cap(CapError::NotPermitted));
+            }
+            if crate::vspace::mapping(&e.cap).is_some() {
+                return Err(InvokeError::AlreadyMapped);
+            }
+            let (asid, generation) =
+                crate::vspace::of(cap.object).ok_or(InvokeError::Unsupported)?;
+            let mut flags = hal::paging::Flags::empty();
+            if rights.contains(Rights::WRITE) {
+                flags = flags.union(hal::paging::Flags::WRITABLE);
+            }
+            if !rights.contains(Rights::EXECUTE) {
+                flags = flags.union(hal::paging::Flags::NO_EXECUTE);
+            }
+            hal::vspace::map_frame(cap.object, vaddr, e.cap.object, flags, hhdm)
+                .map_err(vspace_error)?;
+            let m = Mapping {
+                asid,
+                generation,
+                vpn: vaddr >> 12,
+                level: 0,
+            };
+            e.cap.badge = m.pack().expect("invoke: a user-half mapping packs");
+            reg.set(f, Some(e));
+            Ok(InvokeOk::Done)
+        }
+        Method::FrameUnmap => {
+            crate::vspace::unmap(&cap, hhdm);
+            let mut e = reg.entry(at).expect("invoke: the invoked capability");
+            e.cap.badge = 0;
+            reg.set(at, Some(e));
+            Ok(InvokeOk::Done)
+        }
         Method::UntypedSplit { size, dst } => {
             let dst = slot(reg, dst)?;
             if reg.get(dst).is_some() {
@@ -145,6 +228,15 @@ pub fn invoke(
                 .map_err(|e| InvokeError::Cap(e.into()))?;
             Ok(InvokeOk::Created(obj))
         }
+    }
+}
+
+/// A mapping refusal as an invocation error.
+fn vspace_error(e: hal::vspace::VspaceError) -> InvokeError {
+    match e {
+        hal::vspace::VspaceError::MissingTable => InvokeError::MissingTable,
+        hal::vspace::VspaceError::AlreadyMapped => InvokeError::AlreadyMapped,
+        hal::vspace::VspaceError::BadAddress => InvokeError::Unsupported,
     }
 }
 

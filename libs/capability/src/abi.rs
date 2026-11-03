@@ -155,6 +155,11 @@ pub enum SysError {
     Again = 20,
     /// The endpoint the caller was blocked on was destroyed (ADR 0020).
     Revoked = 21,
+    /// A frame or table mapping needs a page table that is not installed
+    /// (ADR 0023).
+    MissingTable = 22,
+    /// The capability is already mapped, or the address already is.
+    AlreadyMapped = 23,
 }
 
 impl SysError {
@@ -191,6 +196,8 @@ impl SysError {
             19 => InvalidSyscall,
             20 => Again,
             21 => Revoked,
+            22 => MissingTable,
+            23 => AlreadyMapped,
             _ => return None,
         })
     }
@@ -216,6 +223,8 @@ impl From<InvokeError> for SysError {
             InvokeError::OutOfMemory => SysError::OutOfMemory,
             InvokeError::Unsupported => SysError::Unsupported,
             InvokeError::Again => SysError::Again,
+            InvokeError::MissingTable => SysError::MissingTable,
+            InvokeError::AlreadyMapped => SysError::AlreadyMapped,
         }
     }
 }
@@ -243,6 +252,13 @@ pub mod label {
     /// Untyped split: `mr0` = size in bytes (a whole number of pages),
     /// `mr1` = dst.
     pub const UNTYPED_SPLIT: u32 = 9;
+    /// Address space map table: `mr0` = PageTable slot, `mr1` = vaddr.
+    pub const ADDRESS_SPACE_MAP_TABLE: u32 = 10;
+    /// Address space map frame: `mr0` = Frame slot, `mr1` = vaddr, `mr2` =
+    /// rights.
+    pub const ADDRESS_SPACE_MAP_FRAME: u32 = 11;
+    /// Frame unmap: no arguments.
+    pub const FRAME_UNMAP: u32 = 12;
 }
 
 /// The ABI code of an object kind.
@@ -256,6 +272,7 @@ pub const fn kind_code(kind: ObjectKind) -> u64 {
         ObjectKind::Notification => 4,
         ObjectKind::AddressSpace => 5,
         ObjectKind::Thread => 6,
+        ObjectKind::PageTable => 7,
     }
 }
 
@@ -270,6 +287,7 @@ pub const fn kind_from_code(code: u64) -> Option<ObjectKind> {
         4 => ObjectKind::Notification,
         5 => ObjectKind::AddressSpace,
         6 => ObjectKind::Thread,
+        7 => ObjectKind::PageTable,
         _ => return None,
     })
 }
@@ -355,7 +373,11 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
             let kind = kind_from_code(mr[0]).ok_or(SysError::InvalidSyscall)?;
             let fixed = matches!(
                 kind,
-                ObjectKind::Frame | ObjectKind::Endpoint | ObjectKind::Notification
+                ObjectKind::Frame
+                    | ObjectKind::Endpoint
+                    | ObjectKind::Notification
+                    | ObjectKind::PageTable
+                    | ObjectKind::AddressSpace
             );
             if !fixed || mr[1] != 1 {
                 return Err(SysError::Unsupported);
@@ -380,6 +402,22 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
             need(1)?;
             Method::NotificationSignal { bits: mr[0] }
         }
+        label::ADDRESS_SPACE_MAP_TABLE => {
+            need(2)?;
+            Method::AddressSpaceMapTable {
+                table: slot(mr[0])?,
+                vaddr: mr[1],
+            }
+        }
+        label::ADDRESS_SPACE_MAP_FRAME => {
+            need(3)?;
+            Method::AddressSpaceMapFrame {
+                frame: slot(mr[0])?,
+                vaddr: mr[1],
+                rights: rights(mr[2])?,
+            }
+        }
+        label::FRAME_UNMAP => Method::FrameUnmap,
         _ => return Err(SysError::InvalidSyscall),
     })
 }
@@ -415,7 +453,7 @@ mod tests {
 
     // ---------------------------------------------------------------- syscall ABI
 
-    const ALL_ERRORS: [SysError; 21] = [
+    const ALL_ERRORS: [SysError; 23] = [
         SysError::MissingRight,
         SysError::NoGrant,
         SysError::TooManyCaps,
@@ -437,6 +475,8 @@ mod tests {
         SysError::InvalidSyscall,
         SysError::Again,
         SysError::Revoked,
+        SysError::MissingTable,
+        SysError::AlreadyMapped,
     ];
 
     fn msg(label: u32, length: u8, mr: [u64; MSG_REGISTERS]) -> Result<Method, SysError> {
@@ -450,7 +490,7 @@ mod tests {
             assert_eq!(SysError::from_code(e.code()), Some(*e));
         }
         assert_eq!(SysError::from_code(0), None);
-        assert_eq!(SysError::from_code(22), None);
+        assert_eq!(SysError::from_code(24), None);
     }
 
     #[test]
@@ -523,6 +563,22 @@ mod tests {
                 dst: CapId(4)
             })
         );
+        assert_eq!(
+            msg(label::ADDRESS_SPACE_MAP_TABLE, 2, [4, 0x4000_0000, 0, 0]),
+            Ok(Method::AddressSpaceMapTable {
+                table: CapId(4),
+                vaddr: 0x4000_0000
+            })
+        );
+        assert_eq!(
+            msg(label::ADDRESS_SPACE_MAP_FRAME, 3, [4, 0x4000_0000, rw, 0]),
+            Ok(Method::AddressSpaceMapFrame {
+                frame: CapId(4),
+                vaddr: 0x4000_0000,
+                rights: Rights::READ | Rights::WRITE
+            })
+        );
+        assert_eq!(msg(label::FRAME_UNMAP, 0, [0; 4]), Ok(Method::FrameUnmap));
         for size in [0, 0x1800] {
             assert_eq!(
                 msg(label::UNTYPED_SPLIT, 2, [size, 4, 0, 0]),
@@ -533,17 +589,17 @@ mod tests {
 
     #[test]
     fn kind_codes_round_trip() {
-        for code in 0..7 {
+        for code in 0..8 {
             let kind = kind_from_code(code).unwrap();
             assert_eq!(kind_code(kind), code);
         }
-        assert_eq!(kind_from_code(7), None);
+        assert_eq!(kind_from_code(8), None);
     }
 
     #[test]
     fn unknown_label_is_invalid_syscall() {
         assert_eq!(msg(0, 4, [0; 4]), Err(SysError::InvalidSyscall));
-        assert_eq!(msg(10, 4, [0; 4]), Err(SysError::InvalidSyscall));
+        assert_eq!(msg(13, 4, [0; 4]), Err(SysError::InvalidSyscall));
     }
 
     #[test]

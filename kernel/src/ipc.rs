@@ -225,7 +225,7 @@ impl CapAccess for Spaces<'_> {
         let from = self.0.slot(s, src)?;
         let to = self.0.slot(r, dst)?;
         let rights = self.0.cap(from)?.rights;
-        mdb::copy(self.0, from, to, rights)
+        cspace::copy(self.0, from, to, rights)
     }
 }
 

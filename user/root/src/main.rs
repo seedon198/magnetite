@@ -18,6 +18,11 @@ const ENDPOINT: u64 = 7;
 /// The slots of a child Untyped root splits off, and a frame from it.
 const CHILD: u64 = 8;
 const CHILD_FRAME: u64 = 9;
+/// The slot of the AddressSpace root retypes, and the address the kernel
+/// finds the frame copy in slot 16 mapped at.
+const SPACE: u64 = 11;
+const MAPPED: u64 = 0x4000_1000;
+const PAGE: u64 = 4096;
 /// The slot of a CNode root retypes.
 const KID: u64 = 10;
 /// The slot root copies its console capability into, then revokes.
@@ -58,6 +63,129 @@ fn check<T: fmt::Debug>(what: &str, got: Result<T, SysError>, want: Result<(), S
     if !ok {
         say(format_args!("root: {what}: expected {want:?}"));
     }
+    ok
+}
+
+/// An address space of its own making (ADR 0023): tables installed level by
+/// level, frames mapped once per capability, W^X, and the copy and mint
+/// rules. The kernel inspects the result after root exits: `MAPPED` maps the
+/// copy in slot 16, and `MAPPED - PAGE` and `MAPPED + PAGE` are unmapped.
+fn address_space_checks() -> bool {
+    let mut ok = true;
+    let kind = |k| kind_code(k);
+    let retype = |k, at| sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[kind(k), 1, at]);
+    ok &= check(
+        "retype an AddressSpace into slot 11",
+        retype(ObjectKind::AddressSpace, SPACE),
+        Ok(()),
+    );
+    let mut made = Ok(());
+    for at in [12, 13, 14, 17] {
+        made = made.and(retype(ObjectKind::PageTable, at).map(|_| ()));
+    }
+    ok &= check("retype four PageTables", made, Ok(()));
+    ok &= check(
+        "retype a Frame into slot 15",
+        retype(ObjectKind::Frame, 15),
+        Ok(()),
+    );
+    ok &= check(
+        "retype a Frame into slot 18",
+        retype(ObjectKind::Frame, 18),
+        Ok(()),
+    );
+    let (r, rw, rx) = (
+        u64::from(sys::Rights::READ.bits()),
+        u64::from((sys::Rights::READ | sys::Rights::WRITE).bits()),
+        u64::from((sys::Rights::READ | sys::Rights::EXECUTE).bits()),
+    );
+    let base = MAPPED - PAGE;
+    let map = |f: u64, v: u64, rights: u64| {
+        sys::invoke(SPACE, label::ADDRESS_SPACE_MAP_FRAME, &[f, v, rights])
+    };
+    let table = |t: u64| sys::invoke(SPACE, label::ADDRESS_SPACE_MAP_TABLE, &[t, base]);
+    ok &= check(
+        "map a frame with no tables",
+        map(15, base, rw),
+        Err(SysError::MissingTable),
+    );
+    let mut installed = Ok(());
+    for t in [12, 13, 14] {
+        installed = installed.and(table(t).map(|_| ()));
+    }
+    ok &= check(
+        "install a PDPT, a page directory and a page table",
+        installed,
+        Ok(()),
+    );
+    ok &= check(
+        "install a fourth table there",
+        table(17),
+        Err(SysError::AlreadyMapped),
+    );
+    ok &= check("map the frame in slot 15", map(15, base, rw), Ok(()));
+    ok &= check(
+        "map that capability again",
+        map(15, MAPPED, rw),
+        Err(SysError::AlreadyMapped),
+    );
+    let copy = |src: u64, dst: u64| {
+        sys::invoke(
+            sys::CNODE,
+            label::CNODE_COPY,
+            &[src, dst, u64::from(sys::Rights::ALL.bits())],
+        )
+    };
+    ok &= check(
+        "copy the frame capability into slot 16",
+        copy(15, 16),
+        Ok(()),
+    );
+    ok &= check(
+        "map the copy at the same address",
+        map(16, base, r),
+        Err(SysError::AlreadyMapped),
+    );
+    ok &= check(
+        "map the copy, read and execute",
+        map(16, MAPPED, rx),
+        Ok(()),
+    );
+    let wx = u64::from((sys::Rights::READ | sys::Rights::WRITE | sys::Rights::EXECUTE).bits());
+    ok &= check(
+        "map a frame writable and executable",
+        map(18, MAPPED + PAGE, wx),
+        Err(SysError::CapNotPermitted),
+    );
+    ok &= check(
+        "map a frame unreadable",
+        map(18, MAPPED + PAGE, u64::from(sys::Rights::WRITE.bits())),
+        Err(SysError::CapNotPermitted),
+    );
+    ok &= check(
+        "map the frame in slot 18",
+        map(18, MAPPED + PAGE, r),
+        Ok(()),
+    );
+    ok &= check("unmap it", sys::invoke(18, label::FRAME_UNMAP, &[]), Ok(()));
+    ok &= check(
+        "unmap it again",
+        sys::invoke(18, label::FRAME_UNMAP, &[]),
+        Ok(()),
+    );
+    ok &= check(
+        "copy a PageTable capability",
+        copy(12, 19),
+        Err(SysError::CapNotPermitted),
+    );
+    let mint = sys::invoke(sys::CNODE, label::CNODE_MINT, &[15, 19, r, 7]);
+    ok &= check(
+        "mint a frame capability",
+        mint,
+        Err(SysError::CapNotPermitted),
+    );
+    let del = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[15]);
+    ok &= check("delete the frame capability in slot 15", del, Ok(()));
     ok
 }
 
@@ -127,6 +255,8 @@ fn main() -> ! {
     ok &= check("revoke slot 8", sys::revoke(sys::CNODE, CHILD), Ok(()));
     let again = sys::invoke(CHILD, label::UNTYPED_RETYPE, &[frame, 1, CHILD_FRAME]);
     ok &= check("retype a frame into slot 9 again", again, Ok(()));
+    ok &= address_space_checks();
+
     // More arguments than the ABI carries are refused, not truncated (#135).
     let five = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b10, 0, 0, 0, 0]);
     ok &= check(

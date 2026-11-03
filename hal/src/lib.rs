@@ -33,3 +33,4 @@ mod pit;
 pub mod serial;
 pub mod sync;
 pub mod syscall;
+pub mod vspace;

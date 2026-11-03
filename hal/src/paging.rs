@@ -160,6 +160,20 @@ impl AddressSpace {
         Some(Self { root, hhdm })
     }
 
+    /// Top-level entry `i` of the kernel half (256 to 511), with `USER`
+    /// cleared, as every user space's root holds it.
+    ///
+    /// # Panics
+    /// If `i` is not a kernel-half index, or the kernel half is not
+    /// populated.
+    #[must_use]
+    pub fn kernel_root_entry(&self, i: usize) -> u64 {
+        assert!((HIGHER_HALF_START..ENTRY_COUNT).contains(&i));
+        let e = self.entry(self.root.addr(), i);
+        assert!(e.is_present(), "paging: kernel half not populated");
+        e.bits() & !PageTableFlags::USER.bits()
+    }
+
     /// Whether every kernel-half top-level entry (256 to 511) has `USER`
     /// clear, so nothing in the kernel half is reachable from ring 3 whatever
     /// the lower levels say.
@@ -714,7 +728,7 @@ impl AddressSpace {
 }
 
 /// Read the current `CR3` (the active PML4 physical base plus flags).
-fn read_cr3() -> u64 {
+pub(crate) fn read_cr3() -> u64 {
     let value: u64;
     // SAFETY: reading CR3 is a side-effect-free privileged register read.
     unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) }
@@ -727,7 +741,7 @@ fn read_cr3() -> u64 {
 /// # Safety
 /// `pml4_phys` must be the physical base of a valid PML4 that maps the
 /// currently executing code, its stack, and the HHDM.
-unsafe fn write_cr3(pml4_phys: u64) {
+pub(crate) unsafe fn write_cr3(pml4_phys: u64) {
     // SAFETY: guaranteed by the caller's contract above.
     unsafe { asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags)) }
 }
@@ -774,7 +788,7 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 /// Invalidate the TLB entry for one virtual address.
-fn invlpg(virt: u64) {
+pub(crate) fn invlpg(virt: u64) {
     // SAFETY: `invlpg` only flushes a TLB entry; it cannot violate memory
     // safety regardless of the operand.
     unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) }

@@ -65,6 +65,18 @@ All notable changes are documented here. The format follows
   Verified in ring 3: a copy lands in the new CNode and not the task's own,
   and the CNode is destroyed with a capability still inside.
 
+- **Address spaces from Untyped** (#162, ADR 0023 step 2): the `PageTable`
+  object kind (code 7), and `AddressSpace` objects with the kernel half and
+  one of 64 ASIDs. `AddressSpaceMapTable` installs tables level by level,
+  `AddressSpaceMapFrame` maps a frame with W^X-checked rights, and
+  `FrameUnmap` undoes it. A Frame or PageTable capability records its one
+  mapping (ASID, generation, page) in its badge word, and deleting it undoes
+  the mapping; freeing an ASID makes every record of the old space stale.
+  PageTable capabilities cannot be copied, Frame and PageTable capabilities
+  cannot be minted, and a copied Frame capability starts unmapped. New errors
+  `MissingTable` and `AlreadyMapped`. Verified in ring 3 and by the kernel
+  walking the space the root task built.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a
