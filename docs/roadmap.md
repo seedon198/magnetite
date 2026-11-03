@@ -93,7 +93,7 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 ## M5: User servers
 
-**Status: in progress** (epic #20). Revoke is done: every capability records its place in the derivation tree, `CNodeRevoke` takes back what was derived, the last capability destroys its object, and a task is reaped through revoke. #162 is under way: Notification wait and Untyped splitting are done.
+**Status: in progress** (epic #20). Revoke is done: every capability records its place in the derivation tree, `CNodeRevoke` takes back what was derived, the last capability destroys its object, and a task is reaped through revoke. #162 is under way: Notification wait and Untyped splitting are done, and [ADR 0023](adr/0023-user-threads-and-address-spaces.md) plans user-created threads and address spaces in five steps.
 
 - [x] Capability revoke: the derivation tree of [ADR 0020](adr/0020-capability-derivation-and-revoke.md) (#156), before any `GRANT` path between tasks
 - [ ] Notification wait ([ADR 0022](adr/0022-notification-wait.md), done), Untyped splitting (done), user-created `Thread` and `AddressSpace` objects (#162)
