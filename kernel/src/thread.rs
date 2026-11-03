@@ -386,7 +386,6 @@ extern "C" fn object_entry() -> ! {
     hal::syscall::enter_user_once(&entry)
 }
 
-
 /// The lowest address of window slot `slot`'s stack, above its guard page.
 fn window_bottom(slot: usize) -> u64 {
     KSTACK_BASE + slot as u64 * KSTACK_SLOT + PAGE
