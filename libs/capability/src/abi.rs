@@ -378,6 +378,7 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
                     | ObjectKind::Notification
                     | ObjectKind::PageTable
                     | ObjectKind::AddressSpace
+                    | ObjectKind::Thread
             );
             if !fixed || mr[1] != 1 {
                 return Err(SysError::Unsupported);

@@ -277,6 +277,10 @@ impl Dying {
             crate::vspace::free(d.cap.object);
             return;
         }
+        if d.last && d.cap.object.kind == ObjectKind::Thread {
+            crate::thread::unbind_object(d.cap.object);
+            return;
+        }
         if !d.last || d.cap.object.kind != ObjectKind::CNode {
             crate::ipc::destroy(ipc, d);
             return;

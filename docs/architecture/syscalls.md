@@ -74,10 +74,11 @@ the result in the message registers.
   source slot is in the caller's own space. Through a capability to its own
   CNode a task manages its own slots; through one to another CNode it fills
   or clears that one ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)).
-- A retype creates one Frame, Endpoint, Notification, PageTable or
-  AddressSpace, or one CNode, whose slot count (a power of two, at most 256)
-  is `mr3`. An AddressSpace starts with the kernel half and an ASID (64 at
-  most).
+- A retype creates one Frame, Endpoint, Notification, PageTable,
+  AddressSpace or Thread, or one CNode, whose slot count (a power of two, at
+  most 256) is `mr3`. An AddressSpace starts with the kernel half and an ASID
+  (64 at most). A Thread's 16 KiB become the kernel stack of one of 43 thread
+  slots.
 - **Mapping** ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)):
   `AddressSpaceMapTable` installs a PageTable at the first missing level
   above `vaddr` (`AlreadyMapped` when all three are there).

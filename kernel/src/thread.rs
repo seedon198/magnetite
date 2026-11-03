@@ -11,6 +11,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use capability::{ObjectKind, ObjectRef};
 use hal::context::Context;
 use hal::paging::{AddressSpace, Flags, PAGE};
 use hal::sync::SpinLock;
@@ -22,8 +23,22 @@ use crate::{KERNEL_SPACE, SCHED};
 /// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11), the
 /// console server (12), the fault task (13), the root task (14) and the user
 /// demo's entry-path checks (15 to 17), its SSE-state check (18, 19) and the
-/// holder the root task's capabilities are granted to (20).
-pub const MAX: usize = 21;
+/// holder the root task's capabilities are granted to (20); then the threads
+/// tasks create, as Thread objects (21 to 63,
+/// [ADR 0023](../../docs/adr/0023-user-threads-and-address-spaces.md)).
+pub const MAX: usize = 64;
+
+/// The first slot for a Thread object.
+const FIRST_OBJECT: usize = 21;
+
+/// Where a Thread object's memory is mapped as its kernel stack: window slot
+/// `OBJECT_WINDOW + id`, clear of the fixed slots boot threads use.
+const OBJECT_WINDOW: usize = 64;
+
+/// The Thread object bound to each slot, by its storage's physical address.
+/// A leaf lock, never held while taking another; the callers already hold
+/// `CSPACES`, which keeps binds and unbinds from interleaving.
+static OBJECTS: SpinLock<[Option<u64>; MAX]> = SpinLock::new([None; MAX]);
 
 /// Each thread's FPU and SSE state (#83), swapped at every context switch.
 static FPU: [hal::fpu::FpuArea; MAX] = [const { hal::fpu::FpuArea::new() }; MAX];
@@ -124,6 +139,93 @@ pub fn classify_stack(addr: u64) -> Option<&'static str> {
 pub fn kernel_stack_probe(slot: usize) -> (u64, u64) {
     let guard = KSTACK_BASE + slot as u64 * KSTACK_SLOT;
     (guard, guard + PAGE)
+}
+
+/// Whether a slot is free for a new Thread object.
+pub fn has_free_object_slot() -> bool {
+    OBJECTS.lock()[FIRST_OBJECT..].iter().any(Option::is_none)
+}
+
+/// How many Thread objects are bound to a slot.
+pub fn object_threads() -> usize {
+    OBJECTS.lock().iter().flatten().count()
+}
+
+/// The slot Thread object `obj` is bound to.
+pub fn of_object(obj: ObjectRef) -> Option<ThreadId> {
+    OBJECTS
+        .lock()
+        .iter()
+        .position(|o| *o == Some(obj.phys))
+        .map(ThreadId)
+}
+
+/// Bind the freshly retyped Thread object `obj` to a free slot: its 16 KiB
+/// become that slot's kernel stack, mapped in the window behind an unmapped
+/// guard page. `None`, with nothing changed, if no slot is free or a window
+/// table could not be made.
+pub fn bind_object(obj: ObjectRef) -> Option<ThreadId> {
+    assert_eq!(obj.kind, ObjectKind::Thread);
+    let t = {
+        let objects = OBJECTS.lock();
+        (FIRST_OBJECT..MAX).find(|&t| objects[t].is_none())?
+    };
+    let bottom = window_bottom(OBJECT_WINDOW + t);
+    let mapped = hal::cpu::without_interrupts(|| {
+        let mut guard = KERNEL_SPACE.lock();
+        let space = guard.as_mut()?;
+        for page in 0..KSTACK_BYTES / PAGE {
+            let (va, pa) = (bottom + page * PAGE, obj.phys + page * PAGE);
+            if space
+                .map(va, pa, Flags::WRITABLE | Flags::NO_EXECUTE)
+                .is_err()
+            {
+                (0..page).for_each(|p| {
+                    space.unmap(bottom + p * PAGE);
+                });
+                return None;
+            }
+        }
+        Some(())
+    });
+    mapped?;
+    OBJECTS.lock()[t] = Some(obj.phys);
+    KSTACK_TOP[t].store(bottom + KSTACK_BYTES, Ordering::Relaxed);
+    Some(ThreadId(t))
+}
+
+/// Unbind Thread object `obj`, being destroyed: unmap its kernel stack (the
+/// frames are the object's, so they stay with its Untyped) and free its
+/// slot. The thread must not be runnable.
+pub fn unbind_object(obj: ObjectRef) {
+    let Some(ThreadId(t)) = of_object(obj) else {
+        return;
+    };
+    assert!(
+        !hal::cpu::without_interrupts(|| SCHED.lock().contains(ThreadId(t))),
+        "thread: destroying runnable thread {t}"
+    );
+    let bottom = window_bottom(OBJECT_WINDOW + t);
+    hal::cpu::without_interrupts(|| {
+        if let Some(space) = KERNEL_SPACE.lock().as_mut() {
+            for page in 0..KSTACK_BYTES / PAGE {
+                space.unmap(bottom + page * PAGE);
+            }
+        }
+    });
+    KSTACK_TOP[t].store(0, Ordering::Relaxed);
+    FPU[t].reset();
+    OBJECTS.lock()[t] = None;
+}
+
+/// The top of thread `t`'s kernel stack (0 if it has none of its own).
+pub fn kernel_stack_top(t: ThreadId) -> u64 {
+    KSTACK_TOP[t.0].load(Ordering::Relaxed)
+}
+
+/// The lowest address of window slot `slot`'s stack, above its guard page.
+fn window_bottom(slot: usize) -> u64 {
+    KSTACK_BASE + slot as u64 * KSTACK_SLOT + PAGE
 }
 
 /// Record the kernel address space's root, which is in `CR3` now. Call once,

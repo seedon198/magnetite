@@ -77,6 +77,11 @@ All notable changes are documented here. The format follows
   `MissingTable` and `AlreadyMapped`. Verified in ring 3 and by the kernel
   walking the space the root task built.
 
+- **Thread objects** (#162, ADR 0023 step 3): retyping a Thread takes 16 KiB
+  of Untyped and one of 43 free thread slots, and maps that memory as the
+  slot's kernel stack behind a guard page; destroying it unmaps the stack and
+  frees the slot. The thread table grows to 64 slots.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a
