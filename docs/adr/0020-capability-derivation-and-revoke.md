@@ -1,6 +1,6 @@
 # 0020: Capability derivation tree and revoke
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented in PRs #172 to #176)
 - **Date:** 2026-11-02
 
 ## Context
@@ -87,6 +87,14 @@ physical addresses. A physical address of one kind can then no longer be
 used as another, and `cnode_cap_space` consumes its `CNodeRef` instead of
 handing out an aliasable `CapSpace<'static>` (the rest of #106; until then,
 every `hal::object` access checks that it lies in allocated pool frames).
+
+*As built:* `hal::object` takes a kind-checked `ObjectRef` rather than a
+separate token type per kind, since an `ObjectRef` is only ever made by the
+kernel and a token would be just as `Copy`. `cnode_cap_space` takes the
+CNode's `ObjectRef` and returns a `CNodeSpace`: `hal` records its storage
+until it drops, refuses a second space over the same storage, and
+`free_frame` refuses to free storage under a live one, so the `'static`
+space can neither alias nor outlive its memory.
 
 Invariant: the list is a pre-order walk of the derivation tree. The children
 of an entry at depth `d` are the following entries at depth `d + 1`, up to

@@ -193,15 +193,15 @@ pub fn bootstrap_root(t: ThreadId, console: SlotRef, image: &[u8]) -> Result<Boo
         return Err(LoadError::OutOfMemory);
     };
     let region = ROOT_UNTYPED_FRAMES as u64 * PAGE;
-    hal::object::store_untyped(control.addr(), hhdm, Untyped::new(untyped.addr(), region));
+    let ut = ObjectRef::new(ObjectKind::Untyped, control.addr());
+    hal::object::store_untyped(ut, hhdm, Untyped::new(untyped.addr(), region));
 
-    // `cnode` and `keeper` are fresh frames, ours alone, and each gets
-    // exactly one CapSpace.
-    let space = hal::object::cnode_cap_space(cnode.addr(), ROOT_SLOTS, hhdm);
+    // `cnode` and `keeper` are fresh frames, each holding a CNode.
     let own = ObjectRef::new(ObjectKind::CNode, cnode.addr());
+    let space = hal::object::cnode_cap_space(own, ROOT_SLOTS, hhdm);
     cspace::install(t, own, space);
-    let keep_space = hal::object::cnode_cap_space(keeper.addr(), KEEPER_SLOTS, hhdm);
     let keep = ObjectRef::new(ObjectKind::CNode, keeper.addr());
+    let keep_space = hal::object::cnode_cap_space(keep, KEEPER_SLOTS, hhdm);
     let kept =
         cspace::with(|r| r.register(keep, keep_space)).expect("task: the CNode registry is full");
     let boot = Bootstrap {
@@ -211,7 +211,6 @@ pub fn bootstrap_root(t: ThreadId, console: SlotRef, image: &[u8]) -> Result<Boo
         keeper,
         kept,
     };
-    let ut = ObjectRef::new(ObjectKind::Untyped, control.addr());
     cspace::with(|r| {
         let (own_at, ut_at) = (SlotRef::new(kept, 0), SlotRef::new(kept, 1));
         mdb::insert_root(r, own_at, Capability::new(own, Rights::ALL))?;
@@ -382,13 +381,10 @@ fn start_holder() {
     let hhdm = crate::ipc::hhdm();
     let frame = hal::frame::alloc_frame().expect("task: no frame for the holder");
     assert!(cnode_bytes(SLOTS) as u64 <= PAGE);
-    // A fresh frame, ours alone, with exactly one CapSpace.
-    let space = hal::object::cnode_cap_space(frame.addr(), SLOTS, hhdm);
-    cspace::install(
-        HOLDER,
-        ObjectRef::new(ObjectKind::CNode, frame.addr()),
-        space,
-    );
+    // A fresh frame, holding the holder's CNode.
+    let cnode = ObjectRef::new(ObjectKind::CNode, frame.addr());
+    let space = hal::object::cnode_cap_space(cnode, SLOTS, hhdm);
+    cspace::install(HOLDER, cnode, space);
     let stack = Box::leak(alloc::vec![0u8; STACK_BYTES].into_boxed_slice());
     CONTEXTS[HOLDER.0].init(stack.as_ptr() as u64 + STACK_BYTES as u64, holder);
 }
@@ -436,7 +432,7 @@ fn root_demo(console: SlotRef, root: &[u8]) {
     let signalled = cspace::with_space(ROOT, |cs, _| {
         cs.get(CapId(4)).is_ok_and(|c| {
             c.object.kind == ObjectKind::Notification
-                && hal::object::notification_pending(c.object.phys, hhdm) == 0b101
+                && hal::object::notification_pending(c.object, hhdm) == 0b101
         })
     });
     assert_eq!(

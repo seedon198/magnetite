@@ -6,14 +6,18 @@
 //! previously occupied that memory (important when an Untyped region is revoked
 //! and reused). See [ADR 0016](../../docs/adr/0016-capability-implementation.md).
 
-use capability::object::{EndpointState, ObjectRef, Untyped};
+use core::ops::{Deref, DerefMut};
+
+use capability::object::{EndpointState, ObjectKind, ObjectRef, Untyped};
 use capability::space::{CapSpace, Slot};
+
+use crate::sync::SpinLock;
 
 /// Panic unless `[phys, phys + len)` lies in allocated pool frames. Every
 /// access below writes or reads through `hhdm + phys`, so this keeps safe
 /// kernel code from aiming one at memory nobody allocated: the kernel image,
-/// the frame bitmap, MMIO (#106). It cannot tell one live object from
-/// another; typed object references from the CNode registry (ADR 0020) will.
+/// the frame bitmap, MMIO (#106). The accessors also take an [`ObjectRef`]
+/// and check its kind, so one kind of object is never used as another.
 fn check(phys: u64, len: usize) {
     assert!(
         crate::frame::owns(phys, len as u64),
@@ -43,92 +47,166 @@ pub fn retype(untyped: &mut Untyped, size: u64, align: u64, count: u64, hhdm: u6
     Some(base)
 }
 
-/// Form a capability space over a CNode's retyped storage: a `Slot` array at
-/// physical `phys` with `slots` entries, reached through the HHDM.
+/// The most capability spaces alive at once.
+const LIVE_CNODES: usize = 64;
+
+/// The storage, `[start, end)` physical, of every live [`CNodeSpace`]. A
+/// leaf lock: taken under `CSPACES` when a space is dropped, never held
+/// while taking another.
+static LIVE: SpinLock<[Option<(u64, u64)>; LIVE_CNODES]> = SpinLock::new([None; LIVE_CNODES]);
+
+/// Whether a live [`CNodeSpace`] covers any of physical `[start, end)`.
+/// Freeing a frame under one would leave the space pointing at memory a new
+/// owner gets, so [`free_frame`](crate::frame::free_frame) refuses to.
+#[must_use]
+pub fn cnode_live_in(start: u64, end: u64) -> bool {
+    LIVE.lock()
+        .iter()
+        .flatten()
+        .any(|&(s, e)| s < end && start < e)
+}
+
+/// A capability space over a CNode's storage, and the only one: forming a
+/// second over the same storage panics, and so does freeing the storage
+/// while this lives. Dereferences to the [`CapSpace`].
+pub struct CNodeSpace {
+    space: CapSpace<'static, ObjectRef>,
+    start: u64,
+}
+
+impl Deref for CNodeSpace {
+    type Target = CapSpace<'static, ObjectRef>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.space
+    }
+}
+
+impl DerefMut for CNodeSpace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.space
+    }
+}
+
+impl Drop for CNodeSpace {
+    fn drop(&mut self) {
+        let mut live = LIVE.lock();
+        let entry = live
+            .iter_mut()
+            .find(|e| e.is_some_and(|(s, _)| s == self.start))
+            .expect("object: a live CNode space is recorded");
+        *entry = None;
+    }
+}
+
+/// Form the capability space over CNode `cnode`'s retyped storage: a `Slot`
+/// array of `slots` entries, reached through the HHDM.
 ///
 /// Each slot is initialized to empty (overwriting the retyped zeros with a
 /// valid `Slot::empty()`, so no possibly-invalid bytes are ever read), then the
-/// slice is handed back as a [`CapSpace`].
+/// slice is handed back inside a [`CNodeSpace`].
 ///
-/// The caller must pass a `phys` that is a CNode just retyped for `slots` slots
-/// (so `phys .. phys + slots * size_of::<Slot<ObjectRef>>()` is our RAM, mapped
-/// in the HHDM at `hhdm` and owned exclusively by this CNode) and must not form
-/// a second `CapSpace` aliasing the same storage while this one lives. (A safe
-/// wrapper over internal `unsafe`, like the other HHDM-backed HAL constructors.)
+/// # Panics
+/// If `cnode` is not a CNode, its storage is not allocated pool memory, or a
+/// live [`CNodeSpace`] already covers any of it: two spaces over one CNode
+/// would alias (#106).
 #[must_use]
-pub fn cnode_cap_space(phys: u64, slots: usize, hhdm: u64) -> CapSpace<'static, ObjectRef> {
-    check(phys, slots * core::mem::size_of::<Slot<ObjectRef>>());
+pub fn cnode_cap_space(cnode: ObjectRef, slots: usize, hhdm: u64) -> CNodeSpace {
+    assert_eq!(cnode.kind, ObjectKind::CNode, "object: not a CNode");
+    let phys = cnode.phys;
+    let len = slots * core::mem::size_of::<Slot<ObjectRef>>();
+    check(phys, len);
+    let end = phys + len as u64;
+    {
+        let mut live = LIVE.lock();
+        assert!(
+            !live.iter().flatten().any(|&(s, e)| s < end && phys < e),
+            "object: a second capability space over CNode {phys:#x}"
+        );
+        let free = live
+            .iter_mut()
+            .find(|e| e.is_none())
+            .expect("object: too many live CNode spaces");
+        *free = Some((phys, end));
+    }
     let ptr = (hhdm + phys) as *mut Slot<ObjectRef>;
-    // SAFETY: per the caller contract above, `ptr .. ptr + slots` is our
-    // exclusively-owned, HHDM-mapped CNode storage. We `write` (not read)
-    // `Slot::empty()` into each entry first, so the slice then references only
-    // initialized, valid `Slot`s and aliases nothing.
-    unsafe {
+    // SAFETY: `phys .. end` is allocated pool RAM (checked above), mapped in
+    // the HHDM at `hhdm`, and no other live `CNodeSpace` covers any of it
+    // (recorded in `LIVE` until this one drops); and `free_frame` refuses to
+    // free it while this lives, so the `'static` slice never outlives the
+    // memory. We `write` (not read) `Slot::empty()` into each entry first, so
+    // the slice then references only initialized, valid `Slot`s.
+    let space = unsafe {
         for i in 0..slots {
             ptr.add(i).write(Slot::empty());
         }
         CapSpace::new(core::slice::from_raw_parts_mut(ptr, slots))
-    }
+    };
+    CNodeSpace { space, start: phys }
 }
 
-/// Load the [`Untyped`] control block stored at physical `phys` (the storage an
+/// Panic unless `obj` is of `kind`, and return its storage's address.
+fn of_kind(obj: ObjectRef, kind: ObjectKind) -> u64 {
+    assert_eq!(
+        obj.kind, kind,
+        "object: {:#x} used as the wrong kind",
+        obj.phys
+    );
+    obj.phys
+}
+
+/// Load the [`Untyped`] control block of Untyped object `ut` (the storage an
 /// Untyped capability points at), reached via the HHDM.
 ///
-/// The caller must pass a `phys` that holds a valid `Untyped` (written by
-/// [`store_untyped`]); safe wrapper over internal `unsafe`.
+/// The control block must have been written by [`store_untyped`] first.
 #[must_use]
-pub fn load_untyped(phys: u64, hhdm: u64) -> Untyped {
+pub fn load_untyped(ut: ObjectRef, hhdm: u64) -> Untyped {
+    let phys = of_kind(ut, ObjectKind::Untyped);
     check(phys, core::mem::size_of::<Untyped>());
     let ptr = (hhdm + phys) as *const Untyped;
-    // SAFETY: per the contract, `phys` holds a valid, aligned `Untyped` in our
-    // HHDM-mapped RAM; `Untyped` is `repr(C)` and `Copy`, so this read is sound.
+    // SAFETY: `phys` is an Untyped control block in allocated, HHDM-mapped
+    // RAM, aligned for `Untyped`; `Untyped` is `repr(C)` and `Copy`, and any
+    // bit pattern of its three `u64`s is a value, so this read is sound.
     unsafe { ptr.read() }
 }
 
-/// Store an [`Untyped`] control block at physical `phys`, via the HHDM.
-///
-/// The caller must own the storage at `phys` (a control block sized for an
-/// `Untyped`); safe wrapper over internal `unsafe`.
-pub fn store_untyped(phys: u64, hhdm: u64, untyped: Untyped) {
+/// Store the [`Untyped`] control block of Untyped object `ut`, via the HHDM.
+pub fn store_untyped(ut: ObjectRef, hhdm: u64, untyped: Untyped) {
+    let phys = of_kind(ut, ObjectKind::Untyped);
     check(phys, core::mem::size_of::<Untyped>());
     let ptr = (hhdm + phys) as *mut Untyped;
-    // SAFETY: as in `load_untyped`; the caller owns aligned storage for one
+    // SAFETY: as in `load_untyped`: aligned, allocated storage for one
     // `repr(C)` `Untyped` at `phys`.
     unsafe { ptr.write(untyped) }
 }
 
-/// Load the [`EndpointState`] of the Endpoint whose storage is at physical
-/// `phys`, via the HHDM.
-///
-/// The caller must pass a `phys` that is a retyped Endpoint's storage (zeroed
-/// at retype, then written only by [`store_endpoint`]); safe wrapper over
-/// internal `unsafe`.
+/// Load the [`EndpointState`] of Endpoint `ep`, via the HHDM.
 #[must_use]
-pub fn load_endpoint(phys: u64, hhdm: u64) -> EndpointState {
+pub fn load_endpoint(ep: ObjectRef, hhdm: u64) -> EndpointState {
+    let phys = of_kind(ep, ObjectKind::Endpoint);
     check(phys, core::mem::size_of::<EndpointState>());
     let ptr = (hhdm + phys) as *const EndpointState;
-    // SAFETY: per the contract, `phys` is an Endpoint's retyped storage in our
+    // SAFETY: `phys` is an Endpoint's retyped storage in allocated,
     // HHDM-mapped RAM, sized and aligned for `EndpointState` (its fixed
     // layout); the type is `repr(C)`, `Copy`, and valid for any bit pattern
     // of its four `u64`s, so this read is sound.
     unsafe { ptr.read() }
 }
 
-/// Store an Endpoint's [`EndpointState`] at physical `phys`, via the HHDM.
-///
-/// The caller must pass a retyped Endpoint's storage, as for
-/// [`load_endpoint`]; safe wrapper over internal `unsafe`.
-pub fn store_endpoint(phys: u64, hhdm: u64, state: EndpointState) {
+/// Store the [`EndpointState`] of Endpoint `ep`, via the HHDM.
+pub fn store_endpoint(ep: ObjectRef, hhdm: u64, state: EndpointState) {
+    let phys = of_kind(ep, ObjectKind::Endpoint);
     check(phys, core::mem::size_of::<EndpointState>());
     let ptr = (hhdm + phys) as *mut EndpointState;
-    // SAFETY: as in `load_endpoint`; the caller owns that aligned,
+    // SAFETY: as in `load_endpoint`: aligned, allocated,
     // `EndpointState`-sized storage at `phys`.
     unsafe { ptr.write(state) }
 }
 
-/// OR `bits` into the signal word of the Notification whose state lives at
-/// physical `phys` (the first `u64` of its `NotificationState`), via the HHDM.
-pub fn notification_signal(phys: u64, bits: u64, hhdm: u64) {
+/// OR `bits` into the signal word of Notification `n` (the first `u64` of
+/// its `NotificationState`), via the HHDM.
+pub fn notification_signal(n: ObjectRef, bits: u64, hhdm: u64) {
+    let phys = of_kind(n, ObjectKind::Notification);
     check(phys, 8);
     let ptr = (hhdm + phys) as *mut u64;
     // SAFETY: `phys` is a Notification's retyped, zeroed state (its first field
@@ -140,10 +218,10 @@ pub fn notification_signal(phys: u64, bits: u64, hhdm: u64) {
     }
 }
 
-/// Read the pending signal word of the Notification whose state lives at
-/// physical `phys`, via the HHDM.
+/// Read the pending signal word of Notification `n`, via the HHDM.
 #[must_use]
-pub fn notification_pending(phys: u64, hhdm: u64) -> u64 {
+pub fn notification_pending(n: ObjectRef, hhdm: u64) -> u64 {
+    let phys = of_kind(n, ObjectKind::Notification);
     check(phys, 8);
     let ptr = (hhdm + phys) as *const u64;
     // SAFETY: `phys` is a Notification's retyped state in HHDM-mapped RAM; its

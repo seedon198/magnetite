@@ -41,7 +41,11 @@ HHDM), so copies of a capability share one object.
 Each task's capabilities live in a **flat table** of slots; a `CapId` is an
 index (O(1) lookup). A **CNode** is the object form of such a table: retyped
 storage holding a `Slot` array, accessed via the HHDM
-(`hal::object::cnode_cap_space`). A growable, two-level space is composed
+(`hal::object::cnode_cap_space`). That returns a `CNodeSpace`, the only
+capability space over the storage while it lives: forming a second one, or
+freeing the frames under it, panics. Every other `hal::object` accessor takes
+an `ObjectRef` and checks its kind, so one kind of object is never used as
+another. A growable, two-level space is composed
 from CNode capabilities.
 
 ## The derivation tree

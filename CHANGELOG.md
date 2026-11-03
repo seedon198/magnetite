@@ -46,6 +46,10 @@ All notable changes are documented here. The format follows
 
 - A reaped task's memory is no longer kept while another task holds a
   capability into it: the reap revokes that capability instead.
+- `hal::object` accessors take a kind-checked `ObjectRef` instead of a bare
+  physical address, and `cnode_cap_space` returns a `CNodeSpace` that refuses
+  a second space over the same CNode and the freeing of its frames while it
+  lives (#106, ADR 0020 accepted).
 
 ## [0.4.0] - 2026-11-02
 

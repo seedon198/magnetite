@@ -144,8 +144,14 @@ pub fn free_contiguous(base: PhysFrame, count: usize) {
 ///
 /// # Panics
 /// On a double free, or a free of a frame outside the pool (untracked,
-/// reserved, or never usable): all are kernel bugs (see [`FreeError`]).
+/// reserved, or never usable), or of a frame under a live capability space
+/// (`object::CNodeSpace`): all are kernel bugs (see [`FreeError`]).
 pub fn free_frame(frame: PhysFrame) {
+    assert!(
+        !crate::object::cnode_live_in(frame.addr(), frame.addr() + FRAME_SIZE),
+        "frame: freeing {:#x}, the storage of a live capability space",
+        frame.addr()
+    );
     match ALLOCATOR.lock().as_mut() {
         Some(alloc) => {
             if let Err(e) = alloc.free(frame) {
