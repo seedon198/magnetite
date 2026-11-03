@@ -470,6 +470,29 @@ fn root_demo(console: SlotRef, root: &[u8]) {
         1,
         "task: root's address space has no ASID"
     );
+    // The Thread object root made (slot 20) is a thread slot whose kernel
+    // stack is the object's own memory.
+    let made = cspace::with(|r| r.lookup(ROOT, CapId(20)))
+        .expect("task: root's Thread")
+        .object;
+    let t = thread::of_object(made).expect("task: root's Thread has no slot");
+    let top = thread::kernel_stack_top(t);
+    let base = hal::cpu::without_interrupts(|| {
+        KERNEL_SPACE
+            .lock()
+            .as_ref()
+            .and_then(|s| s.translate(top - PAGE))
+    });
+    assert_eq!(
+        base,
+        Some(made.phys + 3 * PAGE),
+        "task: a Thread's stack is not its memory"
+    );
+    assert_eq!(
+        thread::object_threads(),
+        1,
+        "task: one Thread object is bound"
+    );
 
     // The #105 scenario: the root task made an Endpoint (slot 7), and it
     // and its Notification are granted to a server, each a child of the
@@ -503,6 +526,11 @@ fn root_demo(console: SlotRef, root: &[u8]) {
         crate::vspace::live(),
         0,
         "task: the reap left an ASID in use"
+    );
+    assert_eq!(
+        thread::object_threads(),
+        0,
+        "task: the reap left a Thread bound"
     );
     thread::wait_exit(HOLDER, "the holder");
     thread::reap(HOLDER);

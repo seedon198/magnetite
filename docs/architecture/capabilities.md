@@ -133,7 +133,7 @@ budget and cannot exhaust kernel memory.
 | `Notification` | an async signal | signal word + waiters | signal and wait (`Recv`, [ADR 0022](../adr/0022-notification-wait.md)), also from ring 3 |
 | `AddressSpace` | a page-table root | a PML4, and an ASID | retyped and mapped into by tasks ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)); boot tasks' spaces are built by the kernel's loader |
 | `PageTable` | one page-table page below a root | one page | retyped and installed by tasks (ADR 0023) |
-| `Thread` | a schedulable context | - | kernel-internal; a capability to create one is M5 (#162) |
+| `Thread` | a schedulable context | 16 KiB, its kernel stack, and a thread slot | retyped by tasks (ADR 0023); configuring and starting one is next |
 
 Each kind's storage `(size, align)` comes from `ObjectKind::fixed_layout` (or
 `cnode_bytes` for a CNode).

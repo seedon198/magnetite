@@ -186,6 +186,10 @@ fn address_space_checks() -> bool {
     );
     let del = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[15]);
     ok &= check("delete the frame capability in slot 15", del, Ok(()));
+    // A Thread object: 16 KiB that become a kernel stack, left for the
+    // kernel to inspect; the reap gives its slot back.
+    let thread = retype(ObjectKind::Thread, 20);
+    ok &= check("retype a Thread into slot 20", thread, Ok(()));
     ok
 }
 

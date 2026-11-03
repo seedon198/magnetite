@@ -92,15 +92,26 @@ pub fn invoke(
                 return Err(InvokeError::Cap(CapError::Occupied));
             }
             let space = kind == ObjectKind::AddressSpace;
-            if space && (count != 1 || !crate::vspace::has_free()) {
+            let thread = kind == ObjectKind::Thread;
+            if (space || thread) && count != 1 {
+                return Err(InvokeError::Unsupported);
+            }
+            if (space && !crate::vspace::has_free())
+                || (thread && !crate::thread::has_free_object_slot())
+            {
                 return Err(InvokeError::OutOfMemory);
             }
             // The Untyped capability points at its control block (an `Untyped`).
             let mut ut = hal::object::load_untyped(cap.object, hhdm);
             let base = hal::object::retype(&mut ut, size, align, count, hhdm)
                 .ok_or(InvokeError::OutOfMemory)?;
-            hal::object::store_untyped(cap.object, hhdm, ut);
             let obj = ObjectRef::new(kind, base);
+            // A Thread's memory becomes a slot's kernel stack; if that fails
+            // the Untyped is left as it was.
+            if thread && crate::thread::bind_object(obj).is_none() {
+                return Err(InvokeError::OutOfMemory);
+            }
+            hal::object::store_untyped(cap.object, hhdm, ut);
             if space {
                 // A new address space has the kernel half, and an ASID.
                 hal::cpu::without_interrupts(|| {

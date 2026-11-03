@@ -144,7 +144,9 @@ impl ObjectKind {
                 size_of::<NotificationState>() as u64,
                 align_of::<NotificationState>() as u64,
             )),
-            ObjectKind::Untyped | ObjectKind::CNode | ObjectKind::Thread => None,
+            // A Thread is its kernel stack: four pages (ADR 0023).
+            ObjectKind::Thread => Some((16384, 4096)),
+            ObjectKind::Untyped | ObjectKind::CNode => None,
         }
     }
 }
@@ -445,7 +447,7 @@ mod tests {
         // Variable- or not-yet-sized kinds have no fixed layout.
         assert_eq!(ObjectKind::Untyped.fixed_layout(), None);
         assert_eq!(ObjectKind::CNode.fixed_layout(), None);
-        assert_eq!(ObjectKind::Thread.fixed_layout(), None);
+        assert_eq!(ObjectKind::Thread.fixed_layout(), Some((16384, 4096)));
     }
 
     #[test]
