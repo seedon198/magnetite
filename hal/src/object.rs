@@ -8,7 +8,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use capability::object::{EndpointState, ObjectKind, ObjectRef, Untyped};
+use capability::object::{EndpointState, NotificationState, ObjectKind, ObjectRef, Untyped};
 use capability::space::{CapSpace, Slot};
 
 use crate::sync::SpinLock;
@@ -203,30 +203,27 @@ pub fn store_endpoint(ep: ObjectRef, hhdm: u64, state: EndpointState) {
     unsafe { ptr.write(state) }
 }
 
-/// OR `bits` into the signal word of Notification `n` (the first `u64` of
-/// its `NotificationState`), via the HHDM.
-pub fn notification_signal(n: ObjectRef, bits: u64, hhdm: u64) {
+/// Load the [`NotificationState`] of Notification `n`, via the HHDM.
+#[must_use]
+pub fn load_notification(n: ObjectRef, hhdm: u64) -> NotificationState {
     let phys = of_kind(n, ObjectKind::Notification);
-    check(phys, 8);
-    let ptr = (hhdm + phys) as *mut u64;
-    // SAFETY: `phys` is a Notification's retyped, zeroed state (its first field
-    // is the `u64` signal word) in our HHDM-mapped RAM; read-modify-write of
-    // that word stays within the object.
-    unsafe {
-        let cur = ptr.read_volatile();
-        ptr.write_volatile(cur | bits);
-    }
+    check(phys, core::mem::size_of::<NotificationState>());
+    let ptr = (hhdm + phys) as *const NotificationState;
+    // SAFETY: `phys` is a Notification's retyped storage in allocated,
+    // HHDM-mapped RAM, sized and aligned for `NotificationState` (its fixed
+    // layout); the type is `repr(C)`, `Copy`, and valid for any bit pattern
+    // of its three `u64`s, so this read is sound.
+    unsafe { ptr.read() }
 }
 
-/// Read the pending signal word of Notification `n`, via the HHDM.
-#[must_use]
-pub fn notification_pending(n: ObjectRef, hhdm: u64) -> u64 {
+/// Store the [`NotificationState`] of Notification `n`, via the HHDM.
+pub fn store_notification(n: ObjectRef, hhdm: u64, state: NotificationState) {
     let phys = of_kind(n, ObjectKind::Notification);
-    check(phys, 8);
-    let ptr = (hhdm + phys) as *const u64;
-    // SAFETY: `phys` is a Notification's retyped state in HHDM-mapped RAM; its
-    // first field is the `u64` signal word, valid to read.
-    unsafe { ptr.read_volatile() }
+    check(phys, core::mem::size_of::<NotificationState>());
+    let ptr = (hhdm + phys) as *mut NotificationState;
+    // SAFETY: as in `load_notification`: aligned, allocated,
+    // `NotificationState`-sized storage at `phys`.
+    unsafe { ptr.write(state) }
 }
 
 /// Copy `bytes` into physical memory at `phys`, reached via the HHDM. Used to

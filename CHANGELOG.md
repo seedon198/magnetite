@@ -42,6 +42,15 @@ All notable changes are documented here. The format follows
   the endpoint, are taken back at reap, the server wakes with `Revoked`, and
   every frame comes back.
 
+- **Notification wait** (#162,
+  [ADR 0022](docs/adr/0022-notification-wait.md)): `Recv` on a Notification
+  capability with `RECV` returns its pending bits in the badge register and
+  clears them, blocking until a signal if none are pending (`sys::wait`). A
+  signal wakes the longest waiter; destroying the Notification wakes every
+  waiter with `Revoked`. The waiter queue lives in the pure `ipc` engine
+  (`Ipc::wait`, `signal`, `destroy_notification`). Verified in QEMU from a
+  kernel thread (woken by a signal, then by `Revoked`) and from ring 3.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a

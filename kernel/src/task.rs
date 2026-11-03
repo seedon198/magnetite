@@ -432,7 +432,7 @@ fn root_demo(console: SlotRef, root: &[u8]) {
     let signalled = cspace::with_space(ROOT, |cs, _| {
         cs.get(CapId(4)).is_ok_and(|c| {
             c.object.kind == ObjectKind::Notification
-                && hal::object::notification_pending(c.object, hhdm) == 0b101
+                && hal::object::load_notification(c.object, hhdm).signal == 0b101
         })
     });
     assert_eq!(

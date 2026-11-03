@@ -45,6 +45,19 @@ fn dispatch(t: ThreadId, args: &mut SyscallArgs) -> Result<(), SysError> {
             let kind = crate::cspace::with_space(t, |cs, _| cs.get(slot).map(|c| c.object.kind))
                 .and_then(Result::ok)
                 .ok_or(SysError::InvalidCap)?;
+            if kind == ObjectKind::Notification && args.number == sys::RECV {
+                // Wait for its bits (ADR 0022); the receive slot is unused.
+                let bits = ipc::wait(slot).map_err(ipc_error)?;
+                deliver(
+                    args,
+                    Received {
+                        info: MessageInfo::new(0, 0, 0),
+                        mr: [0; MSG_REGISTERS],
+                        badge: bits,
+                    },
+                );
+                return Ok(());
+            }
             if kind != ObjectKind::Endpoint {
                 if args.number != sys::CALL {
                     return Err(SysError::InvalidCap);

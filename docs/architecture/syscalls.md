@@ -29,7 +29,7 @@ register (checked at every boot).
 | Number | Name | Meaning |
 |---|---|---|
 | 1 | `Send` | send through an endpoint; blocks until received |
-| 2 | `Recv` | receive from an endpoint; blocks until a message arrives |
+| 2 | `Recv` | receive from an endpoint; blocks until a message arrives. On a Notification, wait for its bits |
 | 3 | `Call` | send and wait for the reply; on a non-endpoint capability, invoke a kernel object method |
 | 4 | `Reply` | answer the caller in this thread's reply slot |
 | 5 | `ReplyRecv` | reply, then receive, in one step |
@@ -39,6 +39,13 @@ register (checked at every boot).
 Any other number returns `InvalidSyscall`. IPC semantics (rendezvous, badges,
 the reply slot, capability transfer) are in
 [ADR 0018](../adr/0018-synchronous-ipc.md).
+
+**`Recv` on a Notification** ([ADR 0022](../adr/0022-notification-wait.md))
+needs `RECV` on it. It returns the pending bits in `rdi` and clears them, at
+once if any are pending, or else when the next signal arrives; the message
+comes back empty, and the receive slot is unused. A signal wakes the longest
+waiter, and destroying the Notification wakes every waiter with `Revoked`.
+`sys::wait` wraps it.
 
 ## Kernel object methods
 

@@ -13,7 +13,7 @@
 use capability::{CapError, CapId, Capability, MessageInfo, Rights, MSG_REGISTERS};
 use sched::ThreadId;
 
-use crate::{EndpointQueue, IpcError, Message, QueueKind, Received};
+use crate::{EndpointQueue, IpcError, Message, NotificationQueue, QueueKind, Received};
 
 /// How many threads the engine tracks: one slot per schedulable thread.
 pub const MAX_THREADS: usize = sched::MAX_THREADS;
@@ -102,6 +102,8 @@ enum State {
     /// where a capability carried by the reply may land: naming one is the
     /// caller's consent to receive a capability.
     AwaitingReply { slot: Option<CapId> },
+    /// Queued on a Notification, waiting for a signal.
+    Waiting,
 }
 
 /// A message on its way: everything a queued sender needs to complete later.
@@ -287,6 +289,55 @@ impl Ipc {
             out.push(t);
         }
         out
+    }
+
+    /// Wait on a Notification through a capability with `rights`
+    /// ([ADR 0022](../../docs/adr/0022-notification-wait.md)): with bits
+    /// pending, take them all at once; otherwise block until a signal. The
+    /// bits come back as the result's badge, with an empty message. Needs
+    /// `RECV`.
+    pub fn wait(&mut self, n: &mut NotificationQueue, me: ThreadId, rights: Rights) -> Outcome {
+        if !rights.contains(Rights::RECV) {
+            return self.fail(me, IpcError::MissingRight);
+        }
+        if n.signal != 0 {
+            self.t[me.0].result = Some(Ok(Some(Self::bits(n))));
+            return Outcome::new(Effect::Done);
+        }
+        self.enqueue(&mut n.waiters, me, QueueKind::Receivers, State::Waiting);
+        Outcome::new(Effect::Block)
+    }
+
+    /// Signal a Notification: OR `bits` into its word. If any bit is then
+    /// pending and a thread waits, the longest waiter wakes with the whole
+    /// word, which is cleared. The signaller never blocks.
+    pub fn signal(&mut self, n: &mut NotificationQueue, bits: u64) -> Outcome {
+        n.signal |= bits;
+        let mut out = Outcome::new(Effect::Done);
+        if n.signal != 0 {
+            if let Some(t) = self.dequeue(&mut n.waiters) {
+                self.t[t.0].state = State::Idle;
+                self.t[t.0].result = Some(Ok(Some(Self::bits(n))));
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    /// The Notification behind `n` is being destroyed: every waiter wakes
+    /// with `Revoked` (ADR 0020).
+    pub fn destroy_notification(&mut self, n: &mut NotificationQueue) -> Outcome {
+        self.destroy_endpoint(&mut n.waiters)
+    }
+
+    /// Take every pending bit of `n`, as what a waiter receives.
+    fn bits(n: &mut NotificationQueue) -> Received {
+        let badge = core::mem::take(&mut n.signal);
+        Received {
+            info: MessageInfo::new(0, 0, 0),
+            mr: [0; MSG_REGISTERS],
+            badge,
+        }
     }
 
     /// `Reply` (if the reply slot holds a caller), then `Recv`, as one

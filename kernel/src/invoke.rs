@@ -74,7 +74,7 @@ pub fn invoke(
         }
         Method::FrameIdentify => Ok(InvokeOk::Phys(cap.object.phys)),
         Method::NotificationSignal { bits } => {
-            hal::object::notification_signal(cap.object, bits, hhdm);
+            crate::ipc::signal(ipc, cap.object, bits);
             Ok(InvokeOk::Done)
         }
         Method::UntypedRetype { kind, count, dst } => {

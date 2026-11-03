@@ -93,10 +93,10 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 ## M5: User servers
 
-**Status: in progress** (epic #20). Revoke is done: every capability records its place in the derivation tree, `CNodeRevoke` takes back what was derived, the last capability destroys its object, and a task is reaped through revoke. Next is #162.
+**Status: in progress** (epic #20). Revoke is done: every capability records its place in the derivation tree, `CNodeRevoke` takes back what was derived, the last capability destroys its object, and a task is reaped through revoke. #162 is under way: Notification wait is done.
 
 - [x] Capability revoke: the derivation tree of [ADR 0020](adr/0020-capability-derivation-and-revoke.md) (#156), before any `GRANT` path between tasks
-- [ ] Notification wait, Untyped splitting, user-created `Thread` and `AddressSpace` objects (#162)
+- [ ] Notification wait ([ADR 0022](adr/0022-notification-wait.md), done), Untyped splitting, user-created `Thread` and `AddressSpace` objects (#162)
 - [ ] Server runtime library (`libs/`): receive-loop, capability plumbing
 - [ ] Device manager server; bus enumeration (PCI/PCIe via ECAM)
 - [ ] Driver-as-server model proven end to end (e.g. serial or a timer server)

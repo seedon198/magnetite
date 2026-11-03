@@ -85,8 +85,22 @@ fn main() -> ! {
     let note = kind_code(ObjectKind::Notification);
     let retype = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[note, 1, NOTE]);
     ok &= check("retype a Notification into slot 4", retype, Ok(()));
-    let signal = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b101]);
+    // Waiting with bits pending returns them at once, and takes them all.
+    let signal = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b11]);
     ok &= check("signal it", signal, Ok(()));
+    let bits = sys::wait(NOTE);
+    let got = match bits {
+        Ok(0b11) => Ok(()),
+        Ok(other) => {
+            say(format_args!("root: wait gave {other:#b}"));
+            Err(SysError::InvalidSyscall)
+        }
+        Err(e) => Err(e),
+    };
+    ok &= check("wait on it: bits 0b11", got, Ok(()));
+    // Left pending for the kernel to find after root exits.
+    let signal = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b101]);
+    ok &= check("signal it again", signal, Ok(()));
     // An Endpoint too; the kernel grants it to a server once root exits,
     // and reaping root must take it back (#105).
     let endpoint = kind_code(ObjectKind::Endpoint);
