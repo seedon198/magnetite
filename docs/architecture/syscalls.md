@@ -56,10 +56,14 @@ the result in the message registers.
 | 5 | `FrameIdentify` | Frame (`READ`) | none | `mr0` kind, `mr1` size |
 | 6 | `UntypedRetype` | Untyped (`RETYPE`) | `mr0` kind, `mr1` count (1), `mr2` dst | none |
 | 7 | `NotificationSignal` | Notification (`SEND`) | `mr0` bits | none |
+| 8 | `CNodeRevoke` | CNode (`WRITE`) | `mr0` slot | none |
 
 - A CNode method acts on the caller's own capability space, and only through
   a capability to the caller's own CNode.
 - A retype creates one Frame, Endpoint or Notification.
+- `CNodeRevoke` deletes every capability derived from the one in the slot,
+  keeping that one. It makes at most 64 deletions per call, then fails with
+  `Again` if more remain: call it again to continue (`sys::revoke` loops).
 - Kind codes: Untyped 0, CNode 1, Frame 2, Endpoint 3, Notification 4,
   AddressSpace 5, Thread 6.
 - **No physical address ever reaches ring 3.** A retype answers only success,
@@ -87,7 +91,11 @@ the result in the message registers.
 | 7 | `NoReplySlot` | | 17 | `Unsupported` |
 | 8 | `ReplySlotFull` | | 18 | `InvalidCap` |
 | 9 | `PeerExited` | | 19 | `InvalidSyscall` |
-| 10 | `WrongObject` | | | |
+| 10 | `WrongObject` | | 20 | `Again` |
+| | | | 21 | `Revoked` |
+
+`Revoked` wakes a thread blocked on an endpoint that was destroyed, because
+its last capability was deleted or revoked.
 
 ## The root task
 

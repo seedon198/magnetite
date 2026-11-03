@@ -3,6 +3,7 @@
 //! ([ADR 0016](../../docs/adr/0016-capability-implementation.md),
 //! [ADR 0019](../../docs/adr/0019-first-user-task.md) decision 6).
 
+use ::ipc::Ipc;
 use capability::abi::kind_code;
 use capability::{
     mdb, CapError, CapId, InvokeError, InvokeOk, Method, ObjectKind, SlotStore, SysError,
@@ -16,11 +17,14 @@ use crate::cspace::{self, Registry};
 /// capability in CNode `cnode` of the registry, authorize it (kind + rights),
 /// then perform the method's effect. Every change to a slot goes through the
 /// mapping database (ADR 0020): a copy, a mint and a retyped object become
-/// children of the capability they came from.
+/// children of the capability they came from, and a delete or revoke
+/// destroys each object whose last capability it removes. Call with `IPC`
+/// and `CSPACES` held (`ipc::with_caps`).
 ///
 /// CNode methods act on the acting CNode `cnode`: [`invoke_current`] only
 /// lets a task name its own CNode.
 pub fn invoke(
+    ipc: &mut Ipc,
     reg: &mut Registry,
     cnode: u16,
     invoked: CapId,
@@ -57,8 +61,16 @@ pub fn invoke(
         }
         Method::CNodeDelete { id } => {
             let id = slot(reg, id)?;
-            mdb::delete(reg, id).map_err(|e| InvokeError::Cap(e.into()))?;
+            cspace::delete(ipc, reg, id).map_err(InvokeError::Cap)?;
             Ok(InvokeOk::Done)
+        }
+        Method::CNodeRevoke { id } => {
+            let id = slot(reg, id)?;
+            if cspace::revoke(ipc, reg, id).map_err(InvokeError::Cap)? {
+                Ok(InvokeOk::Done)
+            } else {
+                Err(InvokeError::Again)
+            }
         }
         Method::FrameIdentify => Ok(InvokeOk::Phys(cap.object.phys)),
         Method::NotificationSignal { bits } => {
@@ -101,14 +113,14 @@ pub fn invoke_current(
     method: Method,
 ) -> Result<[u64; MSG_REGISTERS], SysError> {
     let hhdm = crate::ipc::hhdm();
-    cspace::with(|reg| {
+    crate::ipc::with_caps(|ipc, reg| {
         let c = reg.of(t).ok_or(SysError::InvalidCap)?;
         let cap = reg.lookup(t, slot).map_err(|_| SysError::InvalidCap)?;
         method.authorize(&cap)?;
         if method.target_kind() == ObjectKind::CNode && cap.object != reg.object(c) {
             return Err(SysError::Unsupported);
         }
-        Ok(match invoke(reg, c, slot, method, hhdm)? {
+        Ok(match invoke(ipc, reg, c, slot, method, hhdm)? {
             InvokeOk::Done | InvokeOk::Created(_) => [0; MSG_REGISTERS],
             InvokeOk::Phys(_) => [kind_code(ObjectKind::Frame), hal::paging::PAGE, 0, 0],
         })

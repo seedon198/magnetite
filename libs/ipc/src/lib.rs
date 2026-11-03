@@ -59,6 +59,9 @@ pub enum IpcError {
     PeerExited,
     /// The endpoint slot named is empty, out of range or not an Endpoint.
     InvalidCap,
+    /// The endpoint this thread was queued on was destroyed: its last
+    /// capability was deleted or revoked (ADR 0020).
+    Revoked,
 }
 
 impl From<IpcError> for capability::SysError {
@@ -75,6 +78,7 @@ impl From<IpcError> for capability::SysError {
             IpcError::ReplySlotFull => S::ReplySlotFull,
             IpcError::PeerExited => S::PeerExited,
             IpcError::InvalidCap => S::InvalidCap,
+            IpcError::Revoked => S::Revoked,
         }
     }
 }
@@ -173,6 +177,7 @@ mod tests {
             (IpcError::ReplySlotFull, SysError::ReplySlotFull),
             (IpcError::PeerExited, SysError::PeerExited),
             (IpcError::InvalidCap, SysError::InvalidCap),
+            (IpcError::Revoked, SysError::Revoked),
         ];
         for (ipc, sys) in pairs {
             assert_eq!(SysError::from(ipc), sys);
@@ -1011,6 +1016,72 @@ mod tests {
             o.caller,
             Effect::Block,
             "a fresh receive works: no stale reply slot"
+        );
+    }
+
+    #[test]
+    fn destroying_an_endpoint_wakes_every_queued_thread_with_revoked() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        for t in [T1, T2] {
+            let o = ipc.send(
+                &mut NoCaps,
+                &mut ep,
+                t,
+                Rights::SEND,
+                0,
+                msg(1, 0, [0; 4]),
+                None,
+            );
+            assert_eq!(o.caller, Effect::Block);
+        }
+        ipc.call(
+            &mut NoCaps,
+            &mut ep,
+            T3,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        let o = ipc.destroy_endpoint(&mut ep);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T1), Some(T2), Some(T3), None]);
+        for t in [T1, T2, T3] {
+            assert_eq!(ipc.take_result(t), Some(Err(IpcError::Revoked)));
+        }
+        assert_eq!(ep, EndpointQueue::new());
+        // The woken threads are idle again: one can receive afresh.
+        let o = ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        assert_eq!(o.caller, Effect::Block);
+        let o = ipc.destroy_endpoint(&mut ep);
+        assert_eq!(woken(&o), [Some(T1), None, None, None]);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::Revoked)));
+    }
+
+    #[test]
+    fn destroying_an_endpoint_leaves_a_taken_caller_waiting_for_its_reply() {
+        let (mut ipc, mut ep) = (Ipc::new(), EndpointQueue::new());
+        ipc.recv(&mut NoCaps, &mut ep, T1, Rights::RECV, None);
+        ipc.call(
+            &mut NoCaps,
+            &mut ep,
+            T2,
+            Rights::SEND,
+            0,
+            msg(1, 0, [0; 4]),
+            None,
+            None,
+        );
+        ipc.take_result(T1);
+        let o = ipc.destroy_endpoint(&mut ep);
+        assert_eq!(woken(&o), [None; 4]);
+        assert_eq!(ipc.take_result(T2), None, "still awaiting the reply");
+        let o = ipc.reply(&mut NoCaps, T1, msg(2, 0, [0; 4]), None);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(
+            ipc.take_result(T2).unwrap().unwrap().unwrap().info.label(),
+            2
         );
     }
 

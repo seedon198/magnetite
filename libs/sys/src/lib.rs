@@ -16,7 +16,7 @@ mod arch;
 
 pub use capability::abi::{kind_code, label, sys as number, SysError, NO_SLOT};
 pub use capability::object::ObjectKind;
-pub use capability::{MessageInfo, MSG_REGISTERS};
+pub use capability::{MessageInfo, Rights, MSG_REGISTERS};
 
 /// Slot 0: always empty; the kernel refuses it.
 pub const NULL: u64 = 0;
@@ -153,6 +153,22 @@ pub fn invoke(slot: u64, label: u32, args: &[u64]) -> Result<[u64; MSG_REGISTERS
     let n = args.len();
     mr[..n].copy_from_slice(args);
     call(slot, MessageInfo::new(label, n as u8, 0), mr, NO_SLOT).map(|r| r.mr)
+}
+
+/// Revoke the capability in slot `id` of the CNode in `cnode`: delete every
+/// capability derived from it, keeping it. The kernel stops after a bounded
+/// number of deletions with [`SysError::Again`]; this loops until it is done
+/// (ADR 0020).
+///
+/// # Errors
+/// The kernel's answer, other than `Again`.
+pub fn revoke(cnode: u64, id: u64) -> Result<(), SysError> {
+    loop {
+        match invoke(cnode, label::CNODE_REVOKE, &[id]) {
+            Err(SysError::Again) => {}
+            r => return r.map(|_| ()),
+        }
+    }
 }
 
 /// Write `bytes` to the console endpoint in `console`, in calls of at most

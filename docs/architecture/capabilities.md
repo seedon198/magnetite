@@ -63,10 +63,24 @@ The tree spans every CNode, so links name slots as `SlotRef`s (a CNode's
 index in the kernel's **CNode registry**, `kernel/src/cspace.rs`, and a slot
 index), never as pointers. The pure `capability::mdb` module does every
 insert, delete and move over a `SlotStore`, which the registry implements; a
-table on its own only reads and writes whole entries. Deleting a capability
-moves what was derived from it up to its parent, and a CNode leaves the
-registry only after every capability in it is deleted. `copy` and `mint` may
+table on its own only reads and writes whole entries. `copy` and `mint` may
 only attenuate, and a slot fills only when empty.
+
+- **Delete** removes one capability. What was derived from it moves up to
+  its parent and stays valid.
+- **Revoke** (`CNodeRevoke`) deletes everything derived from a capability,
+  deepest and last first, and keeps the capability itself. Revoking a minted,
+  badged endpoint capability takes back exactly the copies made from it. One
+  call makes at most 64 deletions and then fails with `Again`, leaving a
+  valid tree for the next call to continue from.
+- **The last capability.** When a delete leaves no other capability to the
+  same object, the object is destroyed. For an Endpoint, every thread queued
+  on it wakes with `Revoked`. Other kinds hold no kernel state to tear down
+  yet; their memory comes back when the task is reaped.
+
+A delete or revoke can wake threads, so it runs under the `IPC` lock and then
+`CSPACES` (`ipc::with_caps`). A CNode leaves the registry only after every
+capability in it is deleted.
 
 ## Untyped memory and retype
 
@@ -77,15 +91,14 @@ budget and cannot exhaust kernel memory.
 - `Untyped { base, size, watermark }` is a bump allocator over a physical
   region; `allocate(size, align, count)` carves naturally-aligned storage
   (checked for alignment, overflow, and exhaustion). Reclamation is
-  whole-region only. There is **no revoke yet** (#105, being built on the
-  derivation tree above): when a task is
+  whole-region only. Reaping does not use revoke yet (#156): when a task is
   reaped, the kernel scans every capability space and frees the task's
   CNode, Untyped control block and Untyped region only if no capability
   anywhere still names an object inside them (`find_reference`);
-  otherwise the memory stays allocated and the holder is reported. A
-  seL4-style capability derivation tree, with revoke that also fails
-  threads blocked on a revoked endpoint, is planned before the first `GRANT`
-  path between tasks.
+  otherwise the memory stays allocated and the holder is reported.
+  Revoking the Untyped and resetting its watermark, so a reap can take its
+  memory back from any holder, comes next, before the first `GRANT` path
+  between tasks.
 - `hal::object::retype` carves from an Untyped and **zeroes** the storage
   through the HHDM, so a retyped object never exposes prior contents.
 - An Untyped capability points at a small `repr(C)` control block holding its
@@ -120,6 +133,7 @@ its required rights), then performs the effect. Methods implemented in M3:
 
 - `CNodeCopy` / `CNodeMint` / `CNodeMove` / `CNodeDelete` - manage capabilities
   (attenuation enforced).
+- `CNodeRevoke` - delete everything derived from a capability (M5, #156).
 - `FrameIdentify` - return a frame's physical address.
 - `UntypedRetype` - carve a fixed-size object and install its capability.
 - `NotificationSignal` - OR bits into a notification's signal word.

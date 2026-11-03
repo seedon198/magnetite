@@ -274,6 +274,21 @@ impl Ipc {
         out
     }
 
+    /// The endpoint behind `ep` is being destroyed: its last capability is
+    /// gone (ADR 0020). Every thread queued on it, sender or receiver, is
+    /// woken with `Revoked`, and the queue is left empty. A caller already
+    /// taken by a receiver is not on the queue; it waits on that receiver's
+    /// reply slot, which the endpoint does not own.
+    pub fn destroy_endpoint(&mut self, ep: &mut EndpointQueue) -> Outcome {
+        let mut out = Outcome::new(Effect::Done);
+        while let Some(t) = self.dequeue(ep) {
+            self.t[t.0].state = State::Idle;
+            self.t[t.0].result = Some(Err(IpcError::Revoked));
+            out.push(t);
+        }
+        out
+    }
+
     /// `Reply` (if the reply slot holds a caller), then `Recv`, as one
     /// operation: a server's loop. With an empty reply slot it just receives.
     /// If the reply fails, the receive does not run.

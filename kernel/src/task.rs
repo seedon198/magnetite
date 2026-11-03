@@ -356,6 +356,8 @@ fn root_demo(console: SlotRef, root: &[u8]) {
         panic!("task: freed memory that a capability still names");
     };
     assert_eq!(kept.holder, held, "task: wrong holder reported");
+    // No endpoint lives at the planted address, so there is nothing to
+    // destroy: delete the entry alone.
     cspace::with(|r| mdb::delete(r, held)).expect("planted");
     if reclaim_memory(kept.boot).is_err() {
         panic!("task: memory still held after its last capability went");

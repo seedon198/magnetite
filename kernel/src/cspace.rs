@@ -9,9 +9,12 @@
 //! transfer keeps the derivation tree consistent across all CNodes.
 //!
 //! One lock, `CSPACES`, guards it all. It nests after `IPC` and before
-//! `SCHED` (the lock order in `hal::sync`).
+//! `SCHED` (the lock order in `hal::sync`). A delete or revoke may destroy
+//! an object and wake threads blocked on it, so it runs under both
+//! (`ipc::with_caps`); reads take `CSPACES` alone.
 
-use capability::mdb::{self, Entry};
+use ::ipc::Ipc;
+use capability::mdb::{self, Deleted, Entry, REVOKE_BUDGET};
 use capability::{CapError, CapId, CapSpace, Capability, ObjectRef, SlotRef, SlotStore};
 use hal::sync::SpinLock;
 use sched::ThreadId;
@@ -140,13 +143,15 @@ impl Registry {
 
     /// Unregister CNode `c` and detach every thread from it. Each capability
     /// it holds is deleted first, so what was derived from them elsewhere
-    /// moves up the tree and no link names the CNode's storage afterwards.
-    pub fn remove(&mut self, c: u16) {
+    /// moves up the tree and no link names the CNode's storage afterwards;
+    /// `deleted` sees each one, to destroy what was the last capability to
+    /// its object.
+    pub fn remove(&mut self, c: u16, mut deleted: impl FnMut(&Deleted<ObjectRef>)) {
         let slots = self.space(c).capacity();
         for i in 0..slots {
             let at = SlotRef::new(c, i as u16);
             if self.get(at).is_some() {
-                mdb::delete(self, at).expect("cspace: an occupied slot");
+                deleted(&mdb::delete(self, at).expect("cspace: an occupied slot"));
             }
         }
         self.cnodes[usize::from(c)] = None;
@@ -239,12 +244,44 @@ pub fn insert_root(
     })
 }
 
+/// Delete the capability at `at`, destroying its object if it was the last
+/// capability to it (ADR 0020). Call with `IPC` and `CSPACES` held.
+///
+/// # Errors
+/// [`CapError::Empty`] if the slot is empty.
+pub fn delete(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<(), CapError> {
+    let d = mdb::delete(r, at)?;
+    crate::ipc::destroy(ipc, &d);
+    Ok(())
+}
+
+/// Revoke the capability at `at`: delete its descendants, deepest and last
+/// first, destroying each object whose last capability goes, for at most
+/// [`REVOKE_BUDGET`] deletions. Returns whether the revoke finished; if not,
+/// call again to continue (ADR 0020). Call with `IPC` and `CSPACES` held.
+///
+/// # Errors
+/// [`CapError::Empty`] if the slot is empty.
+pub fn revoke(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<bool, CapError> {
+    for _ in 0..REVOKE_BUDGET {
+        match mdb::revoke_step(r, at)? {
+            Some((_, d)) => crate::ipc::destroy(ipc, &d),
+            None => return Ok(true),
+        }
+    }
+    Ok(!mdb::has_descendants(r, at)?)
+}
+
+/// Unregister CNode `c`, deleting every capability in it and destroying
+/// what they were the last capabilities to.
+pub fn remove(c: u16) {
+    crate::ipc::with_caps(|ipc, r| r.remove(c, |d| crate::ipc::destroy(ipc, d)));
+}
+
 /// Unregister thread `t`'s CNode, deleting every capability in it, when the
 /// thread is reaped.
 pub fn release(t: ThreadId) {
-    with(|r| {
-        if let Some(c) = r.of(t) {
-            r.remove(c);
-        }
-    });
+    if let Some(c) = with(|r| r.of(t)) {
+        remove(c);
+    }
 }

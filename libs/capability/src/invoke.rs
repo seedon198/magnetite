@@ -48,6 +48,15 @@ pub enum Method {
         /// Slot to clear.
         id: CapId,
     },
+    /// Revoke the capability in slot `id`: delete everything derived from
+    /// it, but not the capability itself. Does at most
+    /// [`REVOKE_BUDGET`](crate::mdb::REVOKE_BUDGET) deletions, then fails
+    /// with [`InvokeError::Again`] if more remain; invoking it again
+    /// continues (ADR 0020).
+    CNodeRevoke {
+        /// Slot whose descendants to delete.
+        id: CapId,
+    },
     /// Identify a Frame: returns its physical address.
     FrameIdentify,
     /// Retype this Untyped into `count` objects of a fixed-size `kind`,
@@ -92,6 +101,8 @@ pub enum InvokeError {
     /// The method is not supported for the given arguments (e.g. retyping a
     /// variable-size kind through this path).
     Unsupported,
+    /// A revoke used its budget with descendants left: invoke it again.
+    Again,
 }
 
 impl Method {
@@ -102,7 +113,8 @@ impl Method {
             Method::CNodeCopy { .. }
             | Method::CNodeMint { .. }
             | Method::CNodeMove { .. }
-            | Method::CNodeDelete { .. } => ObjectKind::CNode,
+            | Method::CNodeDelete { .. }
+            | Method::CNodeRevoke { .. } => ObjectKind::CNode,
             Method::FrameIdentify => ObjectKind::Frame,
             Method::UntypedRetype { .. } => ObjectKind::Untyped,
             Method::NotificationSignal { .. } => ObjectKind::Notification,
@@ -117,7 +129,8 @@ impl Method {
             Method::CNodeCopy { .. }
             | Method::CNodeMint { .. }
             | Method::CNodeMove { .. }
-            | Method::CNodeDelete { .. } => Rights::WRITE,
+            | Method::CNodeDelete { .. }
+            | Method::CNodeRevoke { .. } => Rights::WRITE,
             Method::FrameIdentify => Rights::READ,
             Method::UntypedRetype { .. } => Rights::RETYPE,
             Method::NotificationSignal { .. } => Rights::SEND,
@@ -159,6 +172,9 @@ mod tests {
             Method::CNodeDelete { id: CapId(0) }.target_kind(),
             ObjectKind::CNode
         );
+        let revoke = Method::CNodeRevoke { id: CapId(0) };
+        assert_eq!(revoke.target_kind(), ObjectKind::CNode);
+        assert_eq!(revoke.required_rights(), Rights::WRITE);
         assert_eq!(
             Method::UntypedRetype {
                 kind: ObjectKind::Frame,
