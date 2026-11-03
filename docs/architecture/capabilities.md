@@ -174,10 +174,12 @@ Done in M4:
 
 Moved to M5, tracked:
 
-- The root task building and revoking a whole child task (#162,
-  ADR 0023 step 5). Notification wait
-  ([ADR 0022](../adr/0022-notification-wait.md)), Untyped splitting,
-  user-built address spaces and user-created threads are done.
+- Done in M5 (#162): Notification wait
+  ([ADR 0022](../adr/0022-notification-wait.md)), Untyped splitting, and
+  user-built CNodes, address spaces and threads
+  ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)), shown end to
+  end by the root task building a child task from one Untyped and revoking
+  it.
 - **Revoke**: a capability derivation tree
   ([ADR 0020](../adr/0020-capability-derivation-and-revoke.md), #156), which
   must land before any `GRANT` path between tasks.

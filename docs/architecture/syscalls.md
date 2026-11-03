@@ -150,7 +150,7 @@ Limine boot module. It starts with a 64-slot CNode holding exactly:
 |---|---|---|
 | 0 | empty, always | |
 | 1 | its own CNode | `READ`, `WRITE` |
-| 2 | 128 KiB of Untyped memory | `RETYPE` |
+| 2 | 256 KiB of Untyped memory | `RETYPE` |
 | 3 | the console endpoint, badge 1 | `SEND` only |
 | 5 | its own address space | `MAP`, `READ` |
 

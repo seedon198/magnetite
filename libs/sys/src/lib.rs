@@ -22,7 +22,7 @@ pub use capability::{MessageInfo, Rights, MSG_REGISTERS};
 pub const NULL: u64 = 0;
 /// The root task's own CNode (`READ`, `WRITE`).
 pub const CNODE: u64 = 1;
-/// The root task's Untyped memory, 128 KiB (`RETYPE`).
+/// The root task's Untyped memory, 256 KiB (`RETYPE`).
 pub const UNTYPED: u64 = 2;
 /// The console endpoint (badged, `SEND` only).
 pub const CONSOLE: u64 = 3;
@@ -210,6 +210,13 @@ pub mod debug {
     /// program does not own ends it.
     pub fn read_u64(addr: u64) -> u64 {
         crate::arch::read_u64(addr)
+    }
+
+    /// Write `bytes` at `addr`: for a program that writes code or data into
+    /// a frame it mapped for the purpose. A bad address ends the program; a
+    /// good one can change only the program's own memory.
+    pub fn write_bytes(addr: u64, bytes: &[u8]) {
+        crate::arch::write_bytes(addr, bytes);
     }
 }
 

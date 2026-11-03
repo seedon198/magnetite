@@ -232,6 +232,154 @@ fn thread_checks() -> bool {
     ok
 }
 
+/// The child task's program: signal slot 1 with 5, then wait on slot 2 for
+/// good. Hand-assembled, so it needs no loader: it is all the child is.
+#[rustfmt::skip]
+const CHILD_CODE: &[u8] = &[
+    0xb8, 3, 0, 0, 0,                             // mov eax, CALL
+    0xbf, 1, 0, 0, 0,                             // mov edi, 1
+    0x48, 0xbe, 7, 0, 0, 0, 1, 0, 0, 0,           // mov rsi, signal, 1 word
+    0xba, 5, 0, 0, 0,                             // mov edx, 5
+    0x49, 0xc7, 0xc4, 0xff, 0xff, 0xff, 0xff,     // mov r12, NO_SLOT
+    0x0f, 0x05,                                   // syscall
+    0xb8, 2, 0, 0, 0,                             // mov eax, RECV
+    0xbf, 2, 0, 0, 0,                             // mov edi, 2
+    0x31, 0xf6,                                   // xor esi, esi
+    0x0f, 0x05,                                   // syscall
+    0xb8, 3, 0, 0, 0,                             // mov eax, CALL: never
+    0xbf, 1, 0, 0, 0,                             // mov edi, 1
+    0xba, 0, 1, 0, 0,                             // mov edx, 0x100
+    0x0f, 0x05,                                   // syscall
+    0xb8, 7, 0, 0, 0,                             // mov eax, EXIT
+    0x0f, 0x05,                                   // syscall
+    0xeb, 0xfe,                                   // jmp $
+];
+
+/// Slots for the child task: the Untyped it is built from, its CNode,
+/// address space, three tables, code frame and a copy, stack frame and
+/// Thread, and root's Notifications it signals and waits on.
+const BUDGET: u64 = 32;
+const K_CNODE: u64 = 33;
+const K_SPACE: u64 = 34;
+const K_TABLES: u64 = 35;
+const K_CODE: u64 = 38;
+const K_CODE_RX: u64 = 39;
+const K_STACK: u64 = 40;
+const K_THREAD: u64 = 41;
+const K_TOLD: u64 = 42;
+const K_WAITS: u64 = 43;
+/// Where the child's code and stack go in its space, and where root writes
+/// the code in its own (next to the thread checks' stack page).
+const K_CODE_AT: u64 = 0x40_0000;
+const K_STACK_AT: u64 = 0x40_1000;
+const WRITE_AT: u64 = CHILD_STACK + PAGE;
+
+/// A task of root's own making (ADR 0023 step 5): built from one child
+/// Untyped with its own CNode, address space and Thread, it runs code root
+/// wrote; revoking the Untyped stops it and takes all of it back.
+fn task_checks() -> bool {
+    let mut ok = true;
+    let split = sys::invoke(UNTYPED, label::UNTYPED_SPLIT, &[48 * 1024, BUDGET]);
+    ok &= check("split 48 KiB for a child task", split, Ok(()));
+    let from = |ut: u64, k, at| sys::invoke(ut, label::UNTYPED_RETYPE, &[kind_code(k), 1, at]);
+    let cnode = sys::invoke(
+        BUDGET,
+        label::UNTYPED_RETYPE,
+        &[kind_code(ObjectKind::CNode), 1, K_CNODE, 4],
+    );
+    let mut made = cnode.map(|_| ());
+    for (k, at) in [
+        (ObjectKind::AddressSpace, K_SPACE),
+        (ObjectKind::PageTable, K_TABLES),
+        (ObjectKind::PageTable, K_TABLES + 1),
+        (ObjectKind::PageTable, K_TABLES + 2),
+        (ObjectKind::Frame, K_CODE),
+        (ObjectKind::Frame, K_STACK),
+        (ObjectKind::Thread, K_THREAD),
+    ] {
+        made = made.and(from(BUDGET, k, at).map(|_| ()));
+    }
+    ok &= check(
+        "retype its CNode, space, tables, frames and Thread",
+        made,
+        Ok(()),
+    );
+    let notes = from(UNTYPED, ObjectKind::Notification, K_TOLD).and(from(
+        UNTYPED,
+        ObjectKind::Notification,
+        K_WAITS,
+    ));
+    ok &= check(
+        "retype root's Notifications for it",
+        notes.map(|_| ()),
+        Ok(()),
+    );
+    // Root writes the code through a mapping of its own, then gives the
+    // child a copy of the frame capability, mapped read and execute.
+    let (rw, rx, rws) = (
+        u64::from((sys::Rights::READ | sys::Rights::WRITE).bits()),
+        u64::from((sys::Rights::READ | sys::Rights::EXECUTE).bits()),
+        u64::from(sys::Rights::ALL.bits()),
+    );
+    let mine = sys::invoke(
+        sys::SPACE,
+        label::ADDRESS_SPACE_MAP_FRAME,
+        &[K_CODE, WRITE_AT, rw],
+    );
+    ok &= check("map the code frame into root's space", mine, Ok(()));
+    sys::debug::write_bytes(WRITE_AT, CHILD_CODE);
+    let _ = sys::invoke(K_CODE, label::FRAME_UNMAP, &[]);
+    let copy = sys::invoke(sys::CNODE, label::CNODE_COPY, &[K_CODE, K_CODE_RX, rws]);
+    ok &= check("copy the code frame capability", copy, Ok(()));
+    let mut built = Ok(());
+    for t in 0..3 {
+        let table = [K_TABLES + t, K_CODE_AT];
+        built = built.and(sys::invoke(K_SPACE, label::ADDRESS_SPACE_MAP_TABLE, &table).map(|_| ()));
+    }
+    let map = |f, at, r| sys::invoke(K_SPACE, label::ADDRESS_SPACE_MAP_FRAME, &[f, at, r]);
+    built = built
+        .and(map(K_CODE_RX, K_CODE_AT, rx).map(|_| ()))
+        .and(map(K_STACK, K_STACK_AT, rw).map(|_| ()));
+    ok &= check("build its address space", built, Ok(()));
+    // Its CNode: slot 1 signals root, slot 2 is what it waits on.
+    let send = u64::from(sys::Rights::SEND.bits());
+    let recv = u64::from(sys::Rights::RECV.bits());
+    let caps = sys::invoke(K_CNODE, label::CNODE_COPY, &[K_TOLD, 1, send]).and(sys::invoke(
+        K_CNODE,
+        label::CNODE_COPY,
+        &[K_WAITS, 2, recv],
+    ));
+    ok &= check(
+        "give it two Notification capabilities",
+        caps.map(|_| ()),
+        Ok(()),
+    );
+    let config = [K_CNODE, K_SPACE, K_CODE_AT, K_STACK_AT + PAGE];
+    let started = sys::invoke(K_THREAD, label::THREAD_CONFIGURE, &config).and(sys::invoke(
+        K_THREAD,
+        label::THREAD_RESUME,
+        &[],
+    ));
+    ok &= check("configure and start it", started.map(|_| ()), Ok(()));
+    ok &= bits("the child task signals 5", K_TOLD, 5);
+    settle();
+    // Revoking its Untyped stops it and takes every object back.
+    ok &= check(
+        "revoke its Untyped",
+        sys::revoke(sys::CNODE, BUDGET),
+        Ok(()),
+    );
+    let gone = sys::invoke(K_THREAD, label::THREAD_RESUME, &[]);
+    ok &= check("its Thread is gone", gone, Err(SysError::InvalidCap));
+    ok &= check("signal what it waited on", signal(K_WAITS, 1), Ok(()));
+    ok &= bits("no one took it", K_WAITS, 1);
+    ok &= check("signal root", signal(K_TOLD, 0x1000), Ok(()));
+    ok &= bits("the child never woke", K_TOLD, 0x1000);
+    let again = from(BUDGET, ObjectKind::Thread, K_THREAD);
+    ok &= check("retype a Thread from its Untyped again", again, Ok(()));
+    ok
+}
+
 fn address_space_checks() -> bool {
     let mut ok = true;
     let kind = |k| kind_code(k);
@@ -353,7 +501,7 @@ fn address_space_checks() -> bool {
 
 fn main() -> ! {
     say(format_args!(
-        "root: hello from ring 3; slots 0 null, 1 CNode, 2 Untyped 128 KiB, 3 console, 5 its address space"
+        "root: hello from ring 3; slots 0 null, 1 CNode, 2 Untyped 256 KiB, 3 console, 5 its address space"
     ));
     let mut ok = true;
 
@@ -419,6 +567,7 @@ fn main() -> ! {
     ok &= check("retype a frame into slot 9 again", again, Ok(()));
     ok &= address_space_checks();
     ok &= thread_checks();
+    ok &= task_checks();
 
     // More arguments than the ABI carries are refused, not truncated (#135).
     let five = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b10, 0, 0, 0, 0]);

@@ -183,6 +183,15 @@ and write a program into them. The end-to-end boot check:
 - The root task then revokes the child Untyped it used. The child stops, and
   all of that memory can be retyped again.
 
+*As built:* the root task cannot mint a console capability with another
+badge (its own is badged already), so the child proves it ran by signalling
+a Notification of the root task's, then waits on another for good. Its
+program is a few hand-assembled instructions that the root task writes into
+a frame (`sys::debug::write_bytes`) and maps read and execute in the child's
+space. After the revoke, the Notification the child waited on keeps its
+bits, the child never runs again, and a Thread can be retyped from the same
+memory.
+
 ## Consequences
 
 - A task can build another task entirely from its own memory, and revoke
