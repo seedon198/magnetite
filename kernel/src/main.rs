@@ -1062,6 +1062,26 @@ fn demo_invoke(boot_info: &BootInfo) {
             r.entry(SlotRef::new(c, 0)).is_some(),
             "invoke: revoke took the Untyped"
         );
+        // Nothing retyped from the region is left, so its watermark is back at
+        // the base: the next retype gets the same frame again.
+        let ut = hal::object::load_untyped(uctrl_phys, hhdm);
+        assert_eq!(
+            ut.watermark(),
+            region.addr(),
+            "invoke: revoke kept the watermark"
+        );
+        let again = Method::UntypedRetype {
+            kind: ObjectKind::Frame,
+            count: 1,
+            dst: CapId(5),
+        };
+        assert_eq!(
+            invoke::invoke(ipc, r, c, ut_id, again, hhdm),
+            Ok(InvokeOk::Created(ObjectRef::new(
+                ObjectKind::Frame,
+                frame_phys
+            )))
+        );
         r.remove(c, |d| ipc::destroy(ipc, d));
     });
 

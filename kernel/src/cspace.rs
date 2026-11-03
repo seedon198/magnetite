@@ -15,7 +15,9 @@
 
 use ::ipc::Ipc;
 use capability::mdb::{self, Deleted, Entry, REVOKE_BUDGET};
-use capability::{CapError, CapId, CapSpace, Capability, ObjectRef, SlotRef, SlotStore};
+use capability::{
+    CapError, CapId, CapSpace, Capability, ObjectKind, ObjectRef, SlotRef, SlotStore,
+};
 use hal::sync::SpinLock;
 use sched::ThreadId;
 
@@ -260,16 +262,30 @@ pub fn delete(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<(), CapErr
 /// [`REVOKE_BUDGET`] deletions. Returns whether the revoke finished; if not,
 /// call again to continue (ADR 0020). Call with `IPC` and `CSPACES` held.
 ///
+/// A finished revoke of an Untyped region's original capability leaves
+/// nothing retyped from the region alive, so its watermark goes back to the
+/// base and the whole region can be retyped again.
+///
 /// # Errors
 /// [`CapError::Empty`] if the slot is empty.
 pub fn revoke(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<bool, CapError> {
     for _ in 0..REVOKE_BUDGET {
-        match mdb::revoke_step(r, at)? {
-            Some((_, d)) => crate::ipc::destroy(ipc, &d),
-            None => return Ok(true),
-        }
+        let Some((_, d)) = mdb::revoke_step(r, at)? else {
+            break;
+        };
+        crate::ipc::destroy(ipc, &d);
     }
-    Ok(!mdb::has_descendants(r, at)?)
+    if mdb::has_descendants(r, at)? {
+        return Ok(false);
+    }
+    let obj = r.cap(at)?.object;
+    if obj.kind == ObjectKind::Untyped && mdb::is_original(r, at)? {
+        let hhdm = crate::ipc::hhdm();
+        let mut ut = hal::object::load_untyped(obj.phys, hhdm);
+        ut.reset();
+        hal::object::store_untyped(obj.phys, hhdm, ut);
+    }
+    Ok(true)
 }
 
 /// Unregister CNode `c`, deleting every capability in it and destroying

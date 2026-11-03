@@ -33,6 +33,19 @@ All notable changes are documented here. The format follows
   Verified in QEMU: a revoke in ring 3 takes back a copy of the root task's
   console capability, and a server blocked on an endpoint wakes with
   `Revoked` once its last capability goes.
+- **Reaping a task through revoke** (#105): the kernel keeps the originals
+  of a task's CNode and Untyped capabilities in a keeper CNode and hands the
+  task copies; a reap revokes the originals, taking back everything the task
+  made or granted, wherever it went, and frees all of its memory. A finished
+  revoke of an Untyped's original resets its watermark. Verified in QEMU: the
+  root task's Endpoint and Notification, granted to a server that waits on
+  the endpoint, are taken back at reap, the server wakes with `Revoked`, and
+  every frame comes back.
+
+### Changed
+
+- A reaped task's memory is no longer kept while another task holds a
+  capability into it: the reap revokes that capability instead.
 
 ## [0.4.0] - 2026-11-02
 

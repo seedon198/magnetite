@@ -167,6 +167,13 @@ impl Untyped {
         self.watermark
     }
 
+    /// Make the whole region free again: the watermark back to the base.
+    /// Only once nothing retyped from it is alive: its capability was
+    /// revoked and is the region's only one (ADR 0020).
+    pub fn reset(&mut self) {
+        self.watermark = self.base;
+    }
+
     /// Bytes still available for carving (after the watermark).
     #[must_use]
     pub const fn free(&self) -> u64 {
@@ -208,6 +215,16 @@ mod tests {
         let b = u.allocate(8, 64, 1).unwrap();
         assert_eq!(b % 64, 0);
         assert!(b >= 0x1_0000 + 200);
+    }
+
+    #[test]
+    fn reset_frees_the_whole_region() {
+        let mut u = Untyped::new(0x1_0000, 0x2000);
+        assert!(u.allocate(0x2000, 0x1000, 1).is_some());
+        assert_eq!(u.free(), 0);
+        u.reset();
+        assert_eq!((u.watermark(), u.free()), (0x1_0000, 0x2000));
+        assert_eq!(u.allocate(0x1000, 0x1000, 1), Some(0x1_0000));
     }
 
     #[test]

@@ -136,6 +136,11 @@ pub fn destroy(ipc: &mut Ipc, deleted: &mdb::Deleted<ObjectRef>) {
     }
 }
 
+/// The thread at the head of endpoint `ep`'s queue, if any.
+pub fn waiting_on(ep: ObjectRef) -> Option<ThreadId> {
+    with_caps(|_, _| EndpointQueue::load(&hal::object::load_endpoint(ep.phys, hhdm())).head)
+}
+
 /// The capability spaces as the engine sees them.
 struct Spaces<'a>(&'a mut Registry);
 
@@ -341,13 +346,7 @@ pub fn demo(boot_info: &BootInfo) {
     // back every capability derived from it, the server's included; deleting
     // the original then destroys the endpoint, which wakes the server with
     // `Revoked` (ADR 0020).
-    let waiting = || {
-        with_caps(|_, _| {
-            let q = EndpointQueue::load(&hal::object::load_endpoint(ep.phys, hhdm));
-            q.head == Some(SERVER)
-        })
-    };
-    while !waiting() {
+    while waiting_on(ep) != Some(SERVER) {
         crate::yield_now();
     }
     let derived = [(SERVER, 0), (CLIENT, 0), (CLIENT, 1)];

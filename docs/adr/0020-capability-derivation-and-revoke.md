@@ -130,7 +130,10 @@ capability's authority traces back through its ancestors to an original.
 - **Revoking an Untyped** destroys every object retyped from it, then resets
   its watermark to the region's base, so the memory is reusable. Reaping a
   task becomes: revoke its root Untyped, delete its remaining capabilities,
-  then free the region. `ipc::find_reference` stays as a debug assertion that
+  then free the region. The kernel keeps the originals of a task's CNode and
+  Untyped capabilities in a CNode of its own and gives the task copies, so a
+  task that deletes its own copy cannot lift what it made out of the reap's
+  reach. `ipc::find_reference` stays as a debug assertion that
   revoke left nothing behind.
 
 ### 4. Bounded work: revoke is restartable

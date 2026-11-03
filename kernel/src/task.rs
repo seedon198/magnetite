@@ -9,11 +9,13 @@
 //! kernel boots on.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use ::ipc::{IpcError, Message};
 use boot_info::BootInfo;
 use capability::{
-    cnode_bytes, mdb, CapId, Capability, ObjectKind, ObjectRef, Rights, SlotRef, Untyped,
+    cnode_bytes, mdb, CapError, CapId, Capability, MessageInfo, ObjectKind, ObjectRef, Rights,
+    SlotRef, Untyped,
 };
 use elf::ElfError;
 use hal::frame::PhysFrame;
@@ -148,12 +150,19 @@ extern "C" fn task_entry() -> ! {
 }
 
 /// The kernel memory behind the root task's capabilities, freed by
-/// [`reap_root`].
+/// [`reap_root`]; and the kernel's own CNode holding the originals of the
+/// task's CNode and Untyped capabilities, out of the task's reach.
 pub struct Bootstrap {
     cnode: PhysFrame,
     control: PhysFrame,
     untyped: PhysFrame,
+    keeper: PhysFrame,
+    /// The keeper CNode's registry index.
+    kept: u16,
 }
+
+/// Slots in a task's keeper CNode: its CNode's original, then its Untyped's.
+const KEEPER_SLOTS: usize = 2;
 
 /// Create the root task as thread `t` (ADR 0019 decision 7): a 64-slot CNode
 /// holding exactly its CNode (slot 1, `READ|WRITE`), 64 KiB of Untyped memory
@@ -161,54 +170,71 @@ pub struct Bootstrap {
 /// (slot 3), minted from the console endpoint's original at `console`, with
 /// slot 0 empty; then load `image` into it.
 ///
+/// The task's CNode and Untyped capabilities are copies. The originals stay
+/// in a kernel-held keeper CNode (ADR 0020), so everything the task makes or
+/// hands out descends from them, even after the task deletes its own copies,
+/// and revoking them at reap takes it all back.
+///
 /// # Errors
 /// Memory ran out or the image was refused; nothing of the task remains.
 pub fn bootstrap_root(t: ThreadId, console: SlotRef, image: &[u8]) -> Result<Bootstrap, LoadError> {
     let hhdm = crate::ipc::hhdm();
     assert!(cnode_bytes(ROOT_SLOTS) as u64 <= PAGE);
-    let (Some(cnode), Some(control)) = (hal::frame::alloc_frame(), hal::frame::alloc_frame())
-    else {
+    let frames = [(); 3].map(|()| hal::frame::alloc_frame());
+    let untyped = hal::frame::alloc_contiguous(ROOT_UNTYPED_FRAMES);
+    let ([Some(cnode), Some(control), Some(keeper)], Some(untyped)) = (frames, untyped) else {
+        frames
+            .into_iter()
+            .flatten()
+            .for_each(hal::frame::free_frame);
+        if let Some(u) = untyped {
+            hal::frame::free_contiguous(u, ROOT_UNTYPED_FRAMES);
+        }
         return Err(LoadError::OutOfMemory);
-    };
-    let Some(untyped) = hal::frame::alloc_contiguous(ROOT_UNTYPED_FRAMES) else {
-        hal::frame::free_frame(cnode);
-        hal::frame::free_frame(control);
-        return Err(LoadError::OutOfMemory);
-    };
-    let boot = Bootstrap {
-        cnode,
-        control,
-        untyped,
     };
     let region = ROOT_UNTYPED_FRAMES as u64 * PAGE;
     hal::object::store_untyped(control.addr(), hhdm, Untyped::new(untyped.addr(), region));
 
-    // `cnode` is a fresh frame, ours alone, and gets exactly one CapSpace.
+    // `cnode` and `keeper` are fresh frames, ours alone, and each gets
+    // exactly one CapSpace.
     let space = hal::object::cnode_cap_space(cnode.addr(), ROOT_SLOTS, hhdm);
     let own = ObjectRef::new(ObjectKind::CNode, cnode.addr());
     cspace::install(t, own, space);
-    let roots = [
-        (1, Capability::new(own, Rights::READ | Rights::WRITE)),
-        (
-            2,
-            Capability::new(
-                ObjectRef::new(ObjectKind::Untyped, control.addr()),
-                Rights::RETYPE,
-            ),
-        ),
-    ];
-    for (slot, cap) in roots {
-        cspace::insert_root(t, CapId(slot), cap).expect("task: root slot");
-    }
+    let keep_space = hal::object::cnode_cap_space(keeper.addr(), KEEPER_SLOTS, hhdm);
+    let keep = ObjectRef::new(ObjectKind::CNode, keeper.addr());
+    let kept =
+        cspace::with(|r| r.register(keep, keep_space)).expect("task: the CNode registry is full");
+    let boot = Bootstrap {
+        cnode,
+        control,
+        untyped,
+        keeper,
+        kept,
+    };
+    let ut = ObjectRef::new(ObjectKind::Untyped, control.addr());
     cspace::with(|r| {
+        let (own_at, ut_at) = (SlotRef::new(kept, 0), SlotRef::new(kept, 1));
+        mdb::insert_root(r, own_at, Capability::new(own, Rights::ALL))?;
+        mdb::insert_root(r, ut_at, Capability::new(ut, Rights::ALL))?;
+        mdb::copy(
+            r,
+            own_at,
+            r.slot(t, CapId(1))?,
+            Rights::READ | Rights::WRITE,
+        )?;
+        mdb::copy(r, ut_at, r.slot(t, CapId(2))?, Rights::RETYPE)?;
         let at = r.slot(t, CapId(3))?;
         mdb::mint(r, console, at, Rights::SEND, console::ROOT_BADGE)
     })
-    .expect("task: root console slot");
+    .expect("task: root slots");
     if let Err(e) = spawn(t, ROOT_STACK_SLOT, image) {
         cspace::release(t);
-        if reclaim_memory(boot).is_err() {
-            crate::warn!("task: a refused root task's memory is still named; kept");
+        cspace::remove(kept);
+        if let Err(held) = reclaim_memory(boot) {
+            crate::warn!(
+                "task: a refused root task's memory is still named, at {:?}; kept",
+                held.holder
+            );
         }
         return Err(e);
     }
@@ -216,50 +242,74 @@ pub fn bootstrap_root(t: ThreadId, console: SlotRef, image: &[u8]) -> Result<Boo
 }
 
 /// Memory behind an exited task's capabilities that something still names, so
-/// it was not freed: the capability that holds it, and the memory to retry.
+/// it was kept, never to be freed: the capability that names it.
 pub struct Unreclaimed {
     /// A capability into the task's memory.
     pub holder: SlotRef,
-    /// The task's memory, still allocated.
-    pub boot: Bootstrap,
 }
 
 /// Reclaim the exited root task: its address space and kernel stack, its
 /// capability space, and the memory behind its capabilities. Returns the
 /// frames freed.
 ///
+/// First the originals in the task's keeper CNode are revoked (ADR 0020):
+/// everything derived or retyped from the task's CNode and Untyped goes,
+/// wherever it went. A server the task granted an endpoint loses it, and a
+/// thread blocked on that endpoint wakes with `Revoked`. Each round of a
+/// revoke is bounded, and the reap yields between rounds. Then the task's
+/// remaining capabilities and the originals are deleted.
+///
 /// # Errors
-/// [`Unreclaimed`] if a capability elsewhere still names the task's memory:
-/// there is no revoke yet (#105), so freeing it would let that capability
-/// reach whatever reuses the frames. The thread and capability space are
-/// reclaimed either way; retry the memory with [`reclaim_memory`].
+/// [`Unreclaimed`] if a capability still names the task's memory after all
+/// that, which would be a kernel bug (#105): the memory is kept for ever
+/// rather than let that capability reach whatever reuses the frames.
 pub fn reap_root(t: ThreadId, boot: Bootstrap) -> Result<usize, Unreclaimed> {
     let freed = thread::reap(t);
+    for i in 0..KEEPER_SLOTS {
+        let at = SlotRef::new(boot.kept, i as u16);
+        while !crate::ipc::with_caps(|ipc, r| cspace::revoke(ipc, r, at))
+            .expect("task: an original")
+        {
+            crate::yield_now();
+        }
+    }
     cspace::release(t);
+    cspace::remove(boot.kept);
     reclaim_memory(boot).map(|n| n + freed)
 }
 
-/// Free a task's CNode, Untyped control block and Untyped region, unless a
-/// capability in any capability space still names an object inside them.
+impl Bootstrap {
+    /// The task's memory: its CNode, Untyped control block, keeper CNode and
+    /// Untyped region.
+    fn regions(&self) -> [(u64, u64); 4] {
+        let page = |f: PhysFrame| (f.addr(), f.addr() + PAGE);
+        let untyped = self.untyped.addr();
+        [
+            page(self.cnode),
+            page(self.control),
+            page(self.keeper),
+            (untyped, untyped + ROOT_UNTYPED_FRAMES as u64 * PAGE),
+        ]
+    }
+}
+
+/// Free a task's CNode, Untyped control block, keeper CNode and Untyped
+/// region, unless a capability in any capability space still names an object
+/// inside them.
 ///
 /// # Errors
-/// [`Unreclaimed`], with the memory untouched, if one does.
+/// [`Unreclaimed`], keeping the memory, if one does.
 pub fn reclaim_memory(boot: Bootstrap) -> Result<usize, Unreclaimed> {
-    let untyped = boot.untyped.addr();
-    let regions = [
-        (boot.cnode.addr(), boot.cnode.addr() + PAGE),
-        (boot.control.addr(), boot.control.addr() + PAGE),
-        (untyped, untyped + ROOT_UNTYPED_FRAMES as u64 * PAGE),
-    ];
-    for (start, end) in regions {
+    for (start, end) in boot.regions() {
         if let Some(holder) = cspace::with(|r| r.find_reference(start, end)) {
-            return Err(Unreclaimed { holder, boot });
+            return Err(Unreclaimed { holder });
         }
     }
     hal::frame::free_frame(boot.cnode);
     hal::frame::free_frame(boot.control);
+    hal::frame::free_frame(boot.keeper);
     hal::frame::free_contiguous(boot.untyped, ROOT_UNTYPED_FRAMES);
-    Ok(2 + ROOT_UNTYPED_FRAMES)
+    Ok(3 + ROOT_UNTYPED_FRAMES)
 }
 
 /// Frames currently free.
@@ -311,8 +361,59 @@ fn fault_demo(fault: &[u8]) {
     crate::info!("task: fault task contained and reclaimed");
 }
 
+/// The slot the root task retypes an Endpoint into.
+const ENDPOINT: CapId = CapId(7);
+/// The holder: a kernel thread standing in for a server the root task
+/// granted capabilities to (#105). Its slots: the granted endpoint and
+/// Notification.
+const HOLDER: ThreadId = ThreadId(20);
+const HELD_EP: CapId = CapId(1);
+const HELD_NOTE: CapId = CapId(2);
+/// Set when the holder saw everything granted to it taken back.
+static HOLDER_OK: AtomicBool = AtomicBool::new(false);
+
+/// Give the holder a 4-slot CNode and a stack, for the life of the system;
+/// it is admitted once something has been granted to it.
+fn start_holder() {
+    use alloc::boxed::Box;
+
+    const SLOTS: usize = 4;
+    const STACK_BYTES: usize = 16 * 1024;
+    let hhdm = crate::ipc::hhdm();
+    let frame = hal::frame::alloc_frame().expect("task: no frame for the holder");
+    assert!(cnode_bytes(SLOTS) as u64 <= PAGE);
+    // A fresh frame, ours alone, with exactly one CapSpace.
+    let space = hal::object::cnode_cap_space(frame.addr(), SLOTS, hhdm);
+    cspace::install(
+        HOLDER,
+        ObjectRef::new(ObjectKind::CNode, frame.addr()),
+        space,
+    );
+    let stack = Box::leak(alloc::vec![0u8; STACK_BYTES].into_boxed_slice());
+    CONTEXTS[HOLDER.0].init(stack.as_ptr() as u64 + STACK_BYTES as u64, holder);
+}
+
+/// Wait on the granted endpoint until it is destroyed, then check that both
+/// granted capabilities are gone.
+extern "C" fn holder() -> ! {
+    let woke = crate::ipc::recv(HELD_EP, None);
+    let plain = Message {
+        info: MessageInfo::new(0, 0, 0),
+        mr: [0; 4],
+    };
+    let send = crate::ipc::send(HELD_EP, plain, None);
+    let note = cspace::with(|r| r.lookup(HOLDER, HELD_NOTE));
+    crate::info!("task: holder woke with {woke:?}; then a send gave {send:?}");
+    let ok = woke == Err(IpcError::Revoked)
+        && send == Err(IpcError::InvalidCap)
+        && note == Err(CapError::Empty);
+    HOLDER_OK.store(ok, Ordering::Release);
+    crate::exit_current()
+}
+
 /// The root task, talking to the console server over IPC.
 fn root_demo(console: SlotRef, root: &[u8]) {
+    start_holder();
     let before = free_frames();
     let boot = match bootstrap_root(ROOT, console, root) {
         Ok(boot) => boot,
@@ -343,26 +444,43 @@ fn root_demo(console: SlotRef, root: &[u8]) {
         Some(true),
         "task: slot 4 does not hold the Notification root signalled"
     );
-    // A capability that outlives the task must keep its memory alive (#105):
-    // plant one into root's Untyped region in the console server's space, as
-    // a GRANT would, and the memory must stay allocated until it is gone.
-    let planted = ObjectRef::new(ObjectKind::Endpoint, boot.untyped.addr() + 2 * PAGE);
-    let slot = cspace::with_space(CONSOLE, |cs, _| cs.first_empty())
-        .flatten()
-        .expect("task: the console server has a free slot");
-    let held = cspace::insert_root(CONSOLE, slot, Capability::new(planted, Rights::SEND))
-        .expect("task: plant a capability");
-    let Err(kept) = reap_root(ROOT, boot) else {
-        panic!("task: freed memory that a capability still names");
-    };
-    assert_eq!(kept.holder, held, "task: wrong holder reported");
-    // No endpoint lives at the planted address, so there is nothing to
-    // destroy: delete the entry alone.
-    cspace::with(|r| mdb::delete(r, held)).expect("planted");
-    if reclaim_memory(kept.boot).is_err() {
-        panic!("task: memory still held after its last capability went");
+    // The #105 scenario: the root task made an Endpoint (slot 7), and it
+    // and its Notification are granted to a server, each a child of the
+    // root's capability as an IPC transfer makes it. The server then waits
+    // on the endpoint. Reaping the task must take both back, wake the
+    // server with `Revoked`, and still free all of the task's memory.
+    let ep = cspace::with(|r| {
+        let (ep, note) = (r.slot(ROOT, ENDPOINT)?, r.slot(ROOT, CapId(4))?);
+        let (to_ep, to_note) = (r.slot(HOLDER, HELD_EP)?, r.slot(HOLDER, HELD_NOTE)?);
+        mdb::copy(r, ep, to_ep, Rights::SEND | Rights::RECV)?;
+        mdb::copy(r, note, to_note, Rights::SEND)?;
+        r.cap(ep).map(|c| c.object)
+    })
+    .expect("task: grant the root task's objects to the holder");
+    assert_eq!(
+        ep.kind,
+        ObjectKind::Endpoint,
+        "task: slot 7 is not the root task's Endpoint"
+    );
+    hal::cpu::without_interrupts(|| SCHED.lock().admit(HOLDER));
+    while crate::ipc::waiting_on(ep) != Some(HOLDER) {
+        crate::yield_now();
     }
-    crate::info!("task: memory a capability still names is kept until the capability goes");
+    if let Err(kept) = reap_root(ROOT, boot) {
+        panic!(
+            "task: a capability still names the reaped task's memory, at {:?}",
+            kept.holder
+        );
+    }
+    thread::wait_exit(HOLDER, "the holder");
+    thread::reap(HOLDER);
+    assert!(
+        HOLDER_OK.load(Ordering::Acquire),
+        "task: the holder kept what the reaped task granted it"
+    );
+    crate::info!(
+        "task: reaping the root task revoked what it granted; the waiting holder woke with Revoked"
+    );
     assert_eq!(free_frames(), before, "task: the root task leaked frames");
     crate::info!(
         "task: root task confined to 4 capabilities; console via IPC; all memory reclaimed"

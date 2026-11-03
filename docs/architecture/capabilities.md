@@ -91,14 +91,19 @@ budget and cannot exhaust kernel memory.
 - `Untyped { base, size, watermark }` is a bump allocator over a physical
   region; `allocate(size, align, count)` carves naturally-aligned storage
   (checked for alignment, overflow, and exhaustion). Reclamation is
-  whole-region only. Reaping does not use revoke yet (#156): when a task is
-  reaped, the kernel scans every capability space and frees the task's
-  CNode, Untyped control block and Untyped region only if no capability
-  anywhere still names an object inside them (`find_reference`);
-  otherwise the memory stays allocated and the holder is reported.
-  Revoking the Untyped and resetting its watermark, so a reap can take its
-  memory back from any holder, comes next, before the first `GRANT` path
-  between tasks.
+  whole-region only: a finished revoke of a region's **original**
+  capability leaves nothing retyped from it alive, so the watermark goes back
+  to the base and the whole region can be retyped again.
+- **Reaping a task goes through revoke** (#105, #156). The kernel keeps the
+  originals of a task's CNode and Untyped capabilities in a small keeper
+  CNode of its own, and the task holds copies. Everything the task makes or
+  hands out therefore descends from those originals, even after the task
+  deletes its own copies. A reap revokes them (in bounded rounds, yielding
+  between them), so a server the task granted an endpoint loses it, and a
+  thread blocked on it wakes with `Revoked`; then it deletes the task's
+  remaining capabilities and frees its memory. A final scan
+  (`find_reference`) checks that nothing names the memory any more, and
+  keeps it for ever if something does, which would be a kernel bug.
 - `hal::object::retype` carves from an Untyped and **zeroes** the storage
   through the HHDM, so a retyped object never exposes prior contents.
 - An Untyped capability points at a small `repr(C)` control block holding its
