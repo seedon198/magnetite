@@ -221,6 +221,48 @@ pub fn invoke(
             reg.set(at, Some(e));
             Ok(InvokeOk::Done)
         }
+        Method::ThreadConfigure {
+            cnode,
+            space,
+            entry,
+            stack,
+        } => {
+            let t = crate::thread::of_object(cap.object).ok_or(InvokeError::Unsupported)?;
+            if crate::thread::is_running(t) {
+                return Err(InvokeError::Unsupported);
+            }
+            let cn = reg.cap(slot(reg, cnode)?).map_err(InvokeError::Cap)?;
+            let sp = reg.cap(slot(reg, space)?).map_err(InvokeError::Cap)?;
+            if cn.object.kind != ObjectKind::CNode
+                || sp.object.kind != ObjectKind::AddressSpace
+                || crate::vspace::of(sp.object).is_none()
+            {
+                return Err(InvokeError::WrongObject);
+            }
+            let c = reg.index_of(cn.object).ok_or(InvokeError::WrongObject)?;
+            // Both must be user addresses, so the first entry to ring 3 is
+            // canonical.
+            let top = hal::paging::USER_TOP;
+            if entry >= top || stack > top {
+                return Err(InvokeError::Unsupported);
+            }
+            reg.attach(t, c);
+            crate::thread::configure(t, sp.object, entry, stack);
+            Ok(InvokeOk::Done)
+        }
+        Method::ThreadResume => {
+            let t = crate::thread::of_object(cap.object).ok_or(InvokeError::Unsupported)?;
+            if crate::thread::resume(t) {
+                Ok(InvokeOk::Done)
+            } else {
+                Err(InvokeError::Unsupported)
+            }
+        }
+        Method::ThreadSuspend => {
+            let t = crate::thread::of_object(cap.object).ok_or(InvokeError::Unsupported)?;
+            crate::thread::stop(ipc, t);
+            Ok(InvokeOk::Done)
+        }
         Method::UntypedSplit { size, dst } => {
             let dst = slot(reg, dst)?;
             if reg.get(dst).is_some() {

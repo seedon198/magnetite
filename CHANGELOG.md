@@ -82,6 +82,18 @@ All notable changes are documented here. The format follows
   slot's kernel stack behind a guard page; destroying it unmaps the stack and
   frees the slot. The thread table grows to 64 slots.
 
+- **Running user-created threads** (#162, ADR 0023 step 4):
+  `ThreadConfigure` (label 13) binds a Thread to a CNode and an AddressSpace
+  with an entry and stack, `ThreadResume` (14) starts it at its entry, and
+  `ThreadSuspend` (15) stops it wherever it is (`Ipc::stop` takes it off
+  any endpoint or Notification queue). Destroying a thread's Thread, CNode
+  or AddressSpace stops it, and a thread that destroys its own Thread
+  switches away for good, its stack released once another thread runs. The
+  root task gets its own address space as slot 5, and 128 KiB of Untyped.
+  Verified in ring 3: a thread root starts in its own spaces signals,
+  stays stopped while suspended, is destroyed while waiting, and deletes its
+  own Thread.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a

@@ -43,7 +43,7 @@ const ROOT_STACK_SLOT: usize = 7;
 
 /// Slots in the root task's CNode, and its Untyped memory in frames (64 KiB).
 const ROOT_SLOTS: usize = 64;
-const ROOT_UNTYPED_FRAMES: usize = 16;
+const ROOT_UNTYPED_FRAMES: usize = 32;
 
 /// Each task's entry point, for its first switch into ring 3.
 static ENTRY: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
@@ -161,8 +161,12 @@ pub struct Bootstrap {
     kept: u16,
 }
 
-/// Slots in a task's keeper CNode: its CNode's original, then its Untyped's.
-const KEEPER_SLOTS: usize = 2;
+/// Slots in a task's keeper CNode: the originals of its CNode, its Untyped
+/// and its own address space.
+const KEEPER_SLOTS: usize = 3;
+
+/// The root task's slot for its own address space (ADR 0023).
+const ROOT_SPACE: CapId = CapId(5);
 
 /// Create the root task as thread `t` (ADR 0019 decision 7): a 64-slot CNode
 /// holding exactly its CNode (slot 1, `READ|WRITE`), 64 KiB of Untyped memory
@@ -237,6 +241,18 @@ pub fn bootstrap_root(t: ThreadId, console: SlotRef, image: &[u8]) -> Result<Boo
         }
         return Err(e);
     }
+    // Its own address space, as an AddressSpace capability with an ASID, so
+    // it can map frames it retypes into it (ADR 0023). Root has not run yet:
+    // nothing runs until the boot thread yields.
+    let root = thread::owned_root(t).expect("task: the root task's space");
+    let space = ObjectRef::new(ObjectKind::AddressSpace, root);
+    crate::vspace::alloc(space).expect("task: an ASID for the root task");
+    cspace::with(|r| {
+        let at = SlotRef::new(kept, 2);
+        mdb::insert_root(r, at, Capability::new(space, Rights::ALL))?;
+        mdb::copy(r, at, r.slot(t, ROOT_SPACE)?, Rights::MAP | Rights::READ)
+    })
+    .expect("task: root's address space slot");
     Ok(boot)
 }
 
@@ -263,17 +279,18 @@ pub struct Unreclaimed {
 /// that, which would be a kernel bug (#105): the memory is kept for ever
 /// rather than let that capability reach whatever reuses the frames.
 pub fn reap_root(t: ThreadId, boot: Bootstrap) -> Result<usize, Unreclaimed> {
-    let freed = thread::reap(t);
     for i in 0..KEEPER_SLOTS {
         let at = SlotRef::new(boot.kept, i as u16);
-        while !crate::ipc::with_caps(|ipc, r| cspace::revoke(ipc, r, at))
-            .expect("task: an original")
-        {
+        while crate::ipc::with_caps(|ipc, r| cspace::revoke(ipc, r, at)) == Ok(false) {
             crate::yield_now();
         }
     }
     cspace::release(t);
     cspace::remove(boot.kept);
+    // Only now is the address space the loader built free of the frames and
+    // tables the task mapped into it from its Untyped, so tearing it down
+    // frees nothing but the loader's own pages.
+    let freed = thread::reap(t);
     reclaim_memory(boot).map(|n| n + freed)
 }
 
@@ -467,31 +484,15 @@ fn root_demo(console: SlotRef, root: &[u8]) {
     );
     assert_eq!(
         crate::vspace::live(),
-        1,
-        "task: root's address space has no ASID"
+        2,
+        "task: root's address spaces have no ASIDs"
     );
-    // The Thread object root made (slot 20) is a thread slot whose kernel
-    // stack is the object's own memory.
-    let made = cspace::with(|r| r.lookup(ROOT, CapId(20)))
-        .expect("task: root's Thread")
-        .object;
-    let t = thread::of_object(made).expect("task: root's Thread has no slot");
-    let top = thread::kernel_stack_top(t);
-    let base = hal::cpu::without_interrupts(|| {
-        KERNEL_SPACE
-            .lock()
-            .as_ref()
-            .and_then(|s| s.translate(top - PAGE))
-    });
-    assert_eq!(
-        base,
-        Some(made.phys + 3 * PAGE),
-        "task: a Thread's stack is not its memory"
-    );
+    // Root's threads all went: one destroyed while it waited, one by its own
+    // hand, its stack released once another thread ran.
     assert_eq!(
         thread::object_threads(),
-        1,
-        "task: one Thread object is bound"
+        0,
+        "task: a destroyed Thread is still bound"
     );
 
     // The #105 scenario: the root task made an Endpoint (slot 7), and it
@@ -543,6 +544,6 @@ fn root_demo(console: SlotRef, root: &[u8]) {
     );
     assert_eq!(free_frames(), before, "task: the root task leaked frames");
     crate::info!(
-        "task: root task confined to 4 capabilities; console via IPC; all memory reclaimed"
+        "task: root task confined to 5 capabilities; console via IPC; all memory reclaimed"
     );
 }

@@ -8,6 +8,7 @@
 //! reporting each step through the console server over IPC.
 
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use sys::{kind_code, label, MessageInfo, ObjectKind, SysError, CONSOLE, UNTYPED};
 
@@ -70,6 +71,167 @@ fn check<T: fmt::Debug>(what: &str, got: Result<T, SysError>, want: Result<(), S
 /// level, frames mapped once per capability, W^X, and the copy and mint
 /// rules. The kernel inspects the result after root exits: `MAPPED` maps the
 /// copy in slot 16, and `MAPPED - PAGE` and `MAPPED + PAGE` are unmapped.
+/// Slots for the thread checks: the Thread, a Notification the child
+/// signals, one it waits on, its stack frame, and tables for that stack.
+const RUN: u64 = 20;
+const TOLD: u64 = 22;
+const WAITS: u64 = 23;
+const STACK: u64 = 24;
+const TABLES: u64 = 25;
+/// Where the child's stack page goes in root's own address space.
+const CHILD_STACK: u64 = 0x5000_0000;
+
+/// What the child does when it starts: 0 signal and exit, 1 wait for good,
+/// 2 signal and delete its own Thread.
+static MODE: AtomicU64 = AtomicU64::new(0);
+
+fn signal(n: u64, bits: u64) -> Result<[u64; 4], SysError> {
+    sys::invoke(n, label::NOTIFICATION_SIGNAL, &[bits])
+}
+
+/// A thread root starts in its own address space and capability space.
+extern "C" fn child() -> ! {
+    match MODE.load(Ordering::Acquire) {
+        1 => {
+            let _ = sys::wait(WAITS);
+            let _ = signal(TOLD, 0x100);
+        }
+        2 => {
+            let _ = signal(TOLD, 2);
+            let _ = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[RUN]);
+            let _ = signal(TOLD, 0x200);
+        }
+        _ => {
+            let _ = signal(TOLD, 1);
+        }
+    }
+    sys::exit()
+}
+
+/// Give the scheduler to everyone else for a while.
+fn settle() {
+    for _ in 0..50 {
+        sys::yield_now();
+    }
+}
+
+/// Wait on `n` and check the bits that come back.
+fn bits(what: &str, n: u64, want: u64) -> bool {
+    let got = match sys::wait(n) {
+        Ok(b) if b == want => Ok(()),
+        Ok(other) => {
+            say(format_args!("root: {what}: got {other:#x}"));
+            Err(SysError::InvalidSyscall)
+        }
+        Err(e) => Err(e),
+    };
+    check(what, got, Ok(()))
+}
+
+/// Threads of root's own making (ADR 0023): configured into root's own
+/// spaces with a stack page root maps, started, stopped while waiting,
+/// destroyed while waiting, and destroying themselves.
+fn thread_checks() -> bool {
+    let mut ok = true;
+    let retype = |k, at| sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[kind_code(k), 1, at]);
+    let mut made = Ok(());
+    for (k, at) in [
+        (ObjectKind::Thread, RUN),
+        (ObjectKind::Notification, TOLD),
+        (ObjectKind::Notification, WAITS),
+        (ObjectKind::Frame, STACK),
+    ] {
+        made = made.and(retype(k, at).map(|_| ()));
+    }
+    ok &= check(
+        "retype a Thread, two Notifications and a stack frame",
+        made,
+        Ok(()),
+    );
+    // Tables for the stack page, one level at a time, until all are there.
+    let mut at = TABLES;
+    loop {
+        let _ = retype(ObjectKind::PageTable, at);
+        match sys::invoke(
+            sys::SPACE,
+            label::ADDRESS_SPACE_MAP_TABLE,
+            &[at, CHILD_STACK],
+        ) {
+            Ok(_) => at += 1,
+            Err(_) => {
+                let _ = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[at]);
+                break;
+            }
+        }
+    }
+    let rw = u64::from((sys::Rights::READ | sys::Rights::WRITE).bits());
+    let map = sys::invoke(
+        sys::SPACE,
+        label::ADDRESS_SPACE_MAP_FRAME,
+        &[STACK, CHILD_STACK, rw],
+    );
+    ok &= check("map the stack into root's own space", map, Ok(()));
+    let entry = child as *const () as u64;
+    // As if called: the stack pointer is 8 below 16-byte alignment.
+    let stack = CHILD_STACK + PAGE - 8;
+    let thread = |l, args: &[u64]| sys::invoke(RUN, l, args);
+    let resume = || thread(label::THREAD_RESUME, &[]);
+    ok &= check(
+        "resume an unconfigured Thread",
+        resume(),
+        Err(SysError::Unsupported),
+    );
+    let bad = thread(
+        label::THREAD_CONFIGURE,
+        &[sys::CNODE, sys::SPACE, 1 << 47, stack],
+    );
+    ok &= check(
+        "configure a kernel-half entry",
+        bad,
+        Err(SysError::Unsupported),
+    );
+    let config = [sys::CNODE, sys::SPACE, entry, stack];
+    ok &= check(
+        "configure it in root's spaces",
+        thread(label::THREAD_CONFIGURE, &config),
+        Ok(()),
+    );
+    MODE.store(0, Ordering::Release);
+    ok &= check("start it", resume(), Ok(()));
+    ok &= bits("it signals 1", TOLD, 1);
+    settle();
+    // Stopped while it waits: a signal then finds no waiter.
+    MODE.store(1, Ordering::Release);
+    ok &= check("start it again, to wait", resume(), Ok(()));
+    settle();
+    ok &= check("suspend it", thread(label::THREAD_SUSPEND, &[]), Ok(()));
+    ok &= check("signal what it waited on", signal(WAITS, 1), Ok(()));
+    ok &= bits("the bits stay pending", WAITS, 1);
+    // Destroyed while it waits.
+    ok &= check("start it again, to wait", resume(), Ok(()));
+    settle();
+    let del = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[RUN]);
+    ok &= check("delete the Thread while it waits", del, Ok(()));
+    ok &= check("signal what it waited on", signal(WAITS, 1), Ok(()));
+    ok &= bits("the bits stay pending", WAITS, 1);
+    // A thread that deletes its own Thread never comes back.
+    ok &= check(
+        "retype another Thread",
+        retype(ObjectKind::Thread, RUN),
+        Ok(()),
+    );
+    let again = thread(label::THREAD_CONFIGURE, &config);
+    ok &= check("configure it", again, Ok(()));
+    MODE.store(2, Ordering::Release);
+    ok &= check("start it, to delete itself", resume(), Ok(()));
+    ok &= bits("it signals 2", TOLD, 2);
+    settle();
+    ok &= check("its Thread is gone", resume(), Err(SysError::InvalidCap));
+    ok &= check("signal it saw nothing more", signal(TOLD, 0x1000), Ok(()));
+    ok &= bits("nothing came after the delete", TOLD, 0x1000);
+    ok
+}
+
 fn address_space_checks() -> bool {
     let mut ok = true;
     let kind = |k| kind_code(k);
@@ -186,16 +348,12 @@ fn address_space_checks() -> bool {
     );
     let del = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[15]);
     ok &= check("delete the frame capability in slot 15", del, Ok(()));
-    // A Thread object: 16 KiB that become a kernel stack, left for the
-    // kernel to inspect; the reap gives its slot back.
-    let thread = retype(ObjectKind::Thread, 20);
-    ok &= check("retype a Thread into slot 20", thread, Ok(()));
     ok
 }
 
 fn main() -> ! {
     say(format_args!(
-        "root: hello from ring 3; slots 0 null, 1 CNode, 2 Untyped 64 KiB, 3 console"
+        "root: hello from ring 3; slots 0 null, 1 CNode, 2 Untyped 128 KiB, 3 console, 5 its address space"
     ));
     let mut ok = true;
 
@@ -260,6 +418,7 @@ fn main() -> ! {
     let again = sys::invoke(CHILD, label::UNTYPED_RETYPE, &[frame, 1, CHILD_FRAME]);
     ok &= check("retype a frame into slot 9 again", again, Ok(()));
     ok &= address_space_checks();
+    ok &= thread_checks();
 
     // More arguments than the ABI carries are refused, not truncated (#135).
     let five = sys::invoke(NOTE, label::NOTIFICATION_SIGNAL, &[0b10, 0, 0, 0, 0]);
@@ -272,7 +431,7 @@ fn main() -> ! {
     // Slots it does not hold: the null slot, an empty one, one past its CNode.
     for (slot, what) in [
         (0, "invoke slot 0"),
-        (5, "invoke empty slot 5"),
+        (30, "invoke empty slot 30"),
         (64, "invoke slot 64"),
     ] {
         let r = sys::invoke(slot, label::NOTIFICATION_SIGNAL, &[1]);
@@ -311,30 +470,30 @@ fn main() -> ! {
     ok &= check("retype a 12-slot CNode", odd, Err(SysError::Unsupported));
     let kid = sys::invoke(UNTYPED, label::UNTYPED_RETYPE, &[cnode, 1, KID, 16]);
     ok &= check("retype a 16-slot CNode into slot 10", kid, Ok(()));
-    let into = [CONSOLE, 5, send];
+    let into = [CONSOLE, 6, send];
     ok &= check(
-        "copy the console capability into its slot 5",
+        "copy the console capability into its slot 6",
         sys::invoke(KID, label::CNODE_COPY, &into),
         Ok(()),
     );
-    let mine = sys::invoke(5, label::NOTIFICATION_SIGNAL, &[1]);
+    let mine = sys::invoke(6, label::NOTIFICATION_SIGNAL, &[1]);
     ok &= check(
-        "root's own slot 5 stays empty",
+        "root's own slot 6 stays empty",
         mine,
         Err(SysError::InvalidCap),
     );
     let twice = sys::invoke(KID, label::CNODE_COPY, &into);
     ok &= check(
-        "copy into its slot 5 again",
+        "copy into its slot 6 again",
         twice,
         Err(SysError::CapOccupied),
     );
-    let del = sys::invoke(KID, label::CNODE_DELETE, &[5]);
-    ok &= check("delete its slot 5", del, Ok(()));
-    let del = sys::invoke(KID, label::CNODE_DELETE, &[5]);
-    ok &= check("delete its slot 5 again", del, Err(SysError::CapEmpty));
+    let del = sys::invoke(KID, label::CNODE_DELETE, &[6]);
+    ok &= check("delete its slot 6", del, Ok(()));
+    let del = sys::invoke(KID, label::CNODE_DELETE, &[6]);
+    ok &= check("delete its slot 6 again", del, Err(SysError::CapEmpty));
     let refill = sys::invoke(KID, label::CNODE_COPY, &into);
-    ok &= check("copy into its slot 5 once more", refill, Ok(()));
+    ok &= check("copy into its slot 6 once more", refill, Ok(()));
     let gone = sys::invoke(sys::CNODE, label::CNODE_DELETE, &[KID]);
     ok &= check("delete the CNode, a capability still inside", gone, Ok(()));
 

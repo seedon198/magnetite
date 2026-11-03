@@ -120,6 +120,24 @@ pub enum Method {
     },
     /// Undo this Frame capability's mapping, if it has one.
     FrameUnmap,
+    /// Bind this Thread to the CNode in slot `cnode` as its capability space
+    /// and the AddressSpace in slot `space`, and set where it starts in ring
+    /// 3. The thread must be stopped (ADR 0023).
+    ThreadConfigure {
+        /// The CNode's slot in the acting cap space.
+        cnode: CapId,
+        /// The AddressSpace's slot in the acting cap space.
+        space: CapId,
+        /// The user instruction pointer it starts at.
+        entry: u64,
+        /// The user stack pointer it starts with.
+        stack: u64,
+    },
+    /// Start this configured Thread at its entry. A running one is left as
+    /// it is; a stopped or exited one starts over.
+    ThreadResume,
+    /// Stop this Thread wherever it is, its IPC wait included.
+    ThreadSuspend,
     /// Signal a Notification: OR `bits` into its signal word.
     NotificationSignal {
         /// Bits to set.
@@ -179,6 +197,9 @@ impl Method {
                 ObjectKind::AddressSpace
             }
             Method::FrameUnmap => ObjectKind::Frame,
+            Method::ThreadConfigure { .. } | Method::ThreadResume | Method::ThreadSuspend => {
+                ObjectKind::Thread
+            }
         }
     }
 
@@ -200,6 +221,9 @@ impl Method {
             Method::AddressSpaceMapTable { .. }
             | Method::AddressSpaceMapFrame { .. }
             | Method::FrameUnmap => Rights::MAP,
+            Method::ThreadConfigure { .. } | Method::ThreadResume | Method::ThreadSuspend => {
+                Rights::WRITE
+            }
         }
     }
 

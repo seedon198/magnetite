@@ -22,10 +22,13 @@ pub use capability::{MessageInfo, Rights, MSG_REGISTERS};
 pub const NULL: u64 = 0;
 /// The root task's own CNode (`READ`, `WRITE`).
 pub const CNODE: u64 = 1;
-/// The root task's Untyped memory, 64 KiB (`RETYPE`).
+/// The root task's Untyped memory, 128 KiB (`RETYPE`).
 pub const UNTYPED: u64 = 2;
 /// The console endpoint (badged, `SEND` only).
 pub const CONSOLE: u64 = 3;
+/// The root task's own address space (`MAP`, `READ`), to map frames it
+/// retypes into (ADR 0023).
+pub const SPACE: u64 = 5;
 /// Slots in the root task's CNode.
 pub const ROOT_SLOTS: u64 = 64;
 

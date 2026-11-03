@@ -56,8 +56,47 @@ static KSTACK_TOP: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 /// Each thread's kernel-stack window slot, plus one (0 = none), for reaping.
 static STACK_SLOT_OF: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 
+/// A thread's own address space.
+enum Space {
+    /// Built by the kernel's loader, which owns every page of its user half.
+    Owned(AddressSpace),
+    /// An AddressSpace object, by its root's physical address: every page
+    /// belongs to an Untyped (ADR 0023).
+    Object(u64),
+}
+
+impl Space {
+    fn root(&self) -> u64 {
+        match self {
+            Space::Owned(s) => s.root_phys(),
+            Space::Object(root) => *root,
+        }
+    }
+}
+
 /// Each thread's own address space; `None` runs in the kernel's.
-static SPACES: SpinLock<[Option<AddressSpace>; MAX]> = SpinLock::new([const { None }; MAX]);
+static SPACES: SpinLock<[Option<Space>; MAX]> = SpinLock::new([const { None }; MAX]);
+
+/// Where each Thread object starts in ring 3, set by `configure`.
+static USER_RIP: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
+static USER_RSP: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
+
+/// Threads with one bit each: configured to run; started and not stopped;
+/// asked to stop while running (they switch away on their way out of the
+/// kernel); and destroyed while running, their stacks to unmap once another
+/// thread runs.
+static CONFIGURED: AtomicU64 = AtomicU64::new(0);
+static RUNNING: AtomicU64 = AtomicU64::new(0);
+static STOP_SELF: AtomicU64 = AtomicU64::new(0);
+static ZOMBIES: AtomicU64 = AtomicU64::new(0);
+
+fn bit(t: ThreadId) -> u64 {
+    1 << t.0
+}
+
+/// A slot whose object is gone but whose stack is still to unmap: it matches
+/// no object's address.
+const ZOMBIE: u64 = u64::MAX;
 
 /// The kernel address space's root, and the root currently in `CR3`.
 static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -194,18 +233,29 @@ pub fn bind_object(obj: ObjectRef) -> Option<ThreadId> {
     Some(ThreadId(t))
 }
 
-/// Unbind Thread object `obj`, being destroyed: unmap its kernel stack (the
-/// frames are the object's, so they stay with its Untyped) and free its
-/// slot. The thread must not be runnable.
-pub fn unbind_object(obj: ObjectRef) {
-    let Some(ThreadId(t)) = of_object(obj) else {
+/// Unbind Thread object `obj`, being destroyed: stop the thread, then unmap
+/// its kernel stack (the frames are the object's, so they stay with its
+/// Untyped) and free its slot. If it is the running thread, which is on that
+/// stack now, the unmapping waits until another thread runs. Call with `IPC`
+/// and `CSPACES` held.
+pub fn unbind_object(ipc: &mut ::ipc::Ipc, obj: ObjectRef) {
+    let Some(t) = of_object(obj) else {
         return;
     };
-    assert!(
-        !hal::cpu::without_interrupts(|| SCHED.lock().contains(ThreadId(t))),
-        "thread: destroying runnable thread {t}"
-    );
-    let bottom = window_bottom(OBJECT_WINDOW + t);
+    stop(ipc, t);
+    CONFIGURED.fetch_and(!bit(t), Ordering::Relaxed);
+    hal::cpu::without_interrupts(|| SPACES.lock()[t.0] = None);
+    if current() == Some(t) {
+        OBJECTS.lock()[t.0] = Some(ZOMBIE);
+        ZOMBIES.fetch_or(bit(t), Ordering::Relaxed);
+    } else {
+        release_slot(t);
+    }
+}
+
+/// Unmap slot `t`'s object stack and free the slot.
+fn release_slot(t: ThreadId) {
+    let bottom = window_bottom(OBJECT_WINDOW + t.0);
     hal::cpu::without_interrupts(|| {
         if let Some(space) = KERNEL_SPACE.lock().as_mut() {
             for page in 0..KSTACK_BYTES / PAGE {
@@ -213,15 +263,129 @@ pub fn unbind_object(obj: ObjectRef) {
             }
         }
     });
-    KSTACK_TOP[t].store(0, Ordering::Relaxed);
-    FPU[t].reset();
-    OBJECTS.lock()[t] = None;
+    KSTACK_TOP[t.0].store(0, Ordering::Relaxed);
+    FPU[t.0].reset();
+    OBJECTS.lock()[t.0] = None;
 }
 
-/// The top of thread `t`'s kernel stack (0 if it has none of its own).
-pub fn kernel_stack_top(t: ThreadId) -> u64 {
-    KSTACK_TOP[t.0].load(Ordering::Relaxed)
+/// Release the slots of destroyed threads that were running when destroyed,
+/// now that another thread runs.
+fn reap_zombies() {
+    let me = current();
+    let mut zombies = ZOMBIES.load(Ordering::Relaxed);
+    while zombies != 0 {
+        let t = ThreadId(zombies.trailing_zeros() as usize);
+        zombies &= zombies - 1;
+        if Some(t) != me {
+            ZOMBIES.fetch_and(!bit(t), Ordering::Relaxed);
+            release_slot(t);
+        }
+    }
 }
+
+fn current() -> Option<ThreadId> {
+    hal::cpu::without_interrupts(|| SCHED.lock().current())
+}
+
+/// Bind Thread `t` to the address space `root` and set where it starts in
+/// ring 3. Its capability space is attached separately, in the registry.
+pub fn configure(t: ThreadId, root: ObjectRef, entry: u64, stack: u64) {
+    assert_eq!(root.kind, ObjectKind::AddressSpace);
+    hal::cpu::without_interrupts(|| SPACES.lock()[t.0] = Some(Space::Object(root.phys)));
+    USER_RIP[t.0].store(entry, Ordering::Relaxed);
+    USER_RSP[t.0].store(stack, Ordering::Relaxed);
+    CONFIGURED.fetch_or(bit(t), Ordering::Relaxed);
+}
+
+/// Whether Thread `t` has started and is neither stopped nor exited.
+pub fn is_running(t: ThreadId) -> bool {
+    RUNNING.load(Ordering::Relaxed) & bit(t) != 0 && !has_exited(t)
+}
+
+/// Start configured Thread `t` at its entry, unless it is running. Returns
+/// `false` if it was never configured.
+pub fn resume(t: ThreadId) -> bool {
+    if CONFIGURED.load(Ordering::Relaxed) & bit(t) == 0 {
+        return false;
+    }
+    if is_running(t) {
+        return true;
+    }
+    EXITED.fetch_and(!bit(t), Ordering::Release);
+    RUNNING.fetch_or(bit(t), Ordering::Relaxed);
+    CONTEXTS[t.0].init(KSTACK_TOP[t.0].load(Ordering::Relaxed), object_entry);
+    hal::cpu::without_interrupts(|| SCHED.lock().admit(t));
+    true
+}
+
+/// Stop thread `t` wherever it is: out of IPC, and off the run queue. A
+/// running thread stops itself on its way out of the kernel
+/// ([`stop_if_requested`]). Call with `IPC` held.
+pub fn stop(ipc: &mut ::ipc::Ipc, t: ThreadId) {
+    crate::ipc::stop(ipc, t);
+    RUNNING.fetch_and(!bit(t), Ordering::Relaxed);
+    hal::cpu::without_interrupts(|| {
+        let mut sched = SCHED.lock();
+        if sched.current() == Some(t) {
+            STOP_SELF.fetch_or(bit(t), Ordering::Relaxed);
+        } else {
+            sched.remove(t);
+        }
+    });
+}
+
+/// Stop every thread running in address space `root`, which is being
+/// destroyed, and unbind them from it. Call with `IPC` held.
+pub fn stop_space_users(ipc: &mut ::ipc::Ipc, root: ObjectRef) {
+    for t in (0..MAX).map(ThreadId) {
+        let uses = hal::cpu::without_interrupts(
+            || matches!(SPACES.lock()[t.0], Some(Space::Object(r)) if r == root.phys),
+        );
+        if uses {
+            stop(ipc, t);
+            CONFIGURED.fetch_and(!bit(t), Ordering::Relaxed);
+            hal::cpu::without_interrupts(|| SPACES.lock()[t.0] = None);
+        }
+    }
+}
+
+/// If the running thread was stopped while it ran, leave the run queue and
+/// switch away for good, never returning to ring 3. Call on the way out of a
+/// syscall, with no lock held.
+pub fn stop_if_requested() {
+    hal::cpu::without_interrupts(|| {
+        let mut sched = SCHED.lock();
+        let Some(me) = sched.current() else {
+            return;
+        };
+        if STOP_SELF.fetch_and(!bit(me), Ordering::Relaxed) & bit(me) == 0 {
+            return;
+        }
+        sched.remove(me);
+        let next = sched
+            .current()
+            .expect("thread: the boot thread never stops");
+        drop(sched);
+        switch_to(me, next);
+        unreachable!("thread: a stopped thread was resumed without a restart");
+    });
+}
+
+/// A Thread object's first code, on its own kernel stack and in its own
+/// address space: drop to ring 3 at its configured entry.
+extern "C" fn object_entry() -> ! {
+    reap_zombies();
+    let t = current().expect("thread: a running thread");
+    let entry = hal::syscall::UserEntry {
+        rip: USER_RIP[t.0].load(Ordering::Relaxed),
+        rsp: USER_RSP[t.0].load(Ordering::Relaxed),
+        cap: 0,
+        msg_info: 0,
+        mr: [0; 4],
+    };
+    hal::syscall::enter_user_once(&entry)
+}
+
 
 /// The lowest address of window slot `slot`'s stack, above its guard page.
 fn window_bottom(slot: usize) -> u64 {
@@ -318,7 +482,10 @@ pub fn reap(t: ThreadId) -> usize {
         t.0
     );
     let space = hal::cpu::without_interrupts(|| SPACES.lock()[t.0].take());
-    let mut freed = space.map_or(0, AddressSpace::destroy_user);
+    let mut freed = match space {
+        Some(Space::Owned(s)) => s.destroy_user(),
+        _ => 0,
+    };
     let slot = STACK_SLOT_OF[t.0].swap(0, Ordering::Relaxed);
     KSTACK_TOP[t.0].store(0, Ordering::Relaxed);
     if slot != 0 {
@@ -332,15 +499,26 @@ pub fn reap(t: ThreadId) -> usize {
 
 /// Give thread `t` its own address space.
 pub fn set_address_space(t: ThreadId, space: AddressSpace) {
-    hal::cpu::without_interrupts(|| SPACES.lock()[t.0] = Some(space));
+    hal::cpu::without_interrupts(|| SPACES.lock()[t.0] = Some(Space::Owned(space)));
+}
+
+/// The root of the address space the kernel's loader built for `t`.
+pub fn owned_root(t: ThreadId) -> Option<u64> {
+    hal::cpu::without_interrupts(|| match &SPACES.lock()[t.0] {
+        Some(Space::Owned(s)) => Some(s.root_phys()),
+        _ => None,
+    })
 }
 
 /// Whether thread `t`'s own address space maps `virt`.
 pub fn user_maps(t: ThreadId, virt: u64) -> bool {
-    hal::cpu::without_interrupts(|| {
-        SPACES.lock()[t.0]
-            .as_ref()
-            .is_some_and(|s| s.translate(virt).is_some())
+    hal::cpu::without_interrupts(|| match &SPACES.lock()[t.0] {
+        Some(Space::Owned(s)) => s.translate(virt).is_some(),
+        Some(Space::Object(root)) => {
+            let root = ObjectRef::new(ObjectKind::AddressSpace, *root);
+            hal::vspace::translate(root, virt, crate::ipc::hhdm()).is_some()
+        }
+        None => false,
     })
 }
 
@@ -357,12 +535,13 @@ pub fn switch_to(cur: ThreadId, next: ThreadId) {
     }
     let kernel = KERNEL_ROOT.load(Ordering::Relaxed);
     let spaces = SPACES.lock();
-    let want = spaces[next.0]
-        .as_ref()
-        .map_or(kernel, AddressSpace::root_phys);
+    let want = spaces[next.0].as_ref().map_or(kernel, Space::root);
     if want != 0 && want != CURRENT_ROOT.load(Ordering::Relaxed) {
         match spaces[next.0].as_ref() {
-            Some(space) => space.switch(),
+            Some(Space::Owned(space)) => space.switch(),
+            Some(Space::Object(root)) => {
+                hal::vspace::activate(ObjectRef::new(ObjectKind::AddressSpace, *root));
+            }
             None => {
                 if let Some(space) = KERNEL_SPACE.lock().as_ref() {
                     space.switch();
@@ -377,6 +556,9 @@ pub fn switch_to(cur: ThreadId, next: ThreadId) {
     FPU[cur.0].save();
     FPU[next.0].restore();
     hal::context::switch(&CONTEXTS[cur.0], &CONTEXTS[next.0]);
+    // Back in this thread: the one that destroyed its own Thread object is
+    // no longer running, so its stack can go.
+    reap_zombies();
 }
 
 /// Check a kernel stack's guard page: the page below the stack faults, the
