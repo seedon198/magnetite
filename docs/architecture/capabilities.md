@@ -108,6 +108,12 @@ budget and cannot exhaust kernel memory.
   remaining capabilities and frees its memory. A final scan
   (`find_reference`) checks that nothing names the memory any more, and
   keeps it for ever if something does, which would be a kernel bug.
+- **Splitting** (`UntypedSplit`, #162) carves a child Untyped of whole
+  pages from a region, a separate budget a server can hand a client: what is
+  retyped from the child comes out of its pages only. The child's control
+  block heads its own storage (`Untyped::child`). Its capability is a child of
+  the parent's, so revoking the parent takes the child and everything made
+  from it, and revoking the child resets the child's watermark.
 - `hal::object::retype` carves from an Untyped and **zeroes** the storage
   through the HHDM, so a retyped object never exposes prior contents.
 - An Untyped capability points at a small `repr(C)` control block holding its
@@ -117,7 +123,7 @@ budget and cannot exhaust kernel memory.
 
 | Kind | Represents | Storage | Status |
 |---|---|---|---|
-| `Untyped` | unused physical memory | control block + region | retype works |
+| `Untyped` | unused physical memory | control block + region | retype and split work |
 | `CNode` | a capability-space node | `Slot` array | backs the cap space |
 | `Frame` | a physical page | one page | create + identify |
 | `Endpoint` | a synchronous IPC rendezvous | its blocked-thread queue | IPC works between kernel threads (#81); user mode in #82 |
@@ -164,9 +170,9 @@ Done in M4:
 
 Moved to M5, tracked:
 
-- **Untyped splitting**, and user-created **`Thread`** and **`AddressSpace`**
-  objects (#162). Notification wait is done
-  ([ADR 0022](../adr/0022-notification-wait.md)).
+- User-created **`Thread`** and **`AddressSpace`** objects (#162).
+  Notification wait ([ADR 0022](../adr/0022-notification-wait.md)) and
+  Untyped splitting are done.
 - **Revoke**: a capability derivation tree
   ([ADR 0020](../adr/0020-capability-derivation-and-revoke.md), #156), which
   must land before any `GRANT` path between tasks.

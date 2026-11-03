@@ -51,6 +51,12 @@ All notable changes are documented here. The format follows
   (`Ipc::wait`, `signal`, `destroy_notification`). Verified in QEMU from a
   kernel thread (woken by a signal, then by `Revoked`) and from ring 3.
 
+- **Untyped splitting** (#162): the `UntypedSplit` method (label 9) carves a
+  child Untyped of whole pages, a bounded memory budget whose control block
+  heads its own storage; it derives from the parent's capability, so revoke
+  takes it back. Verified in ring 3: an 8 KiB child holds one frame, refuses
+  a second, and holds one again after it is revoked.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a

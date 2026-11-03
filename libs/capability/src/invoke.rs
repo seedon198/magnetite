@@ -69,6 +69,17 @@ pub enum Method {
         /// Slot to install the (first) new capability into.
         dst: CapId,
     },
+    /// Split a child Untyped of `size` bytes (a whole number of pages) from
+    /// this one, installing its capability at `dst` in the acting cap space.
+    /// The child is a separate memory budget: what is retyped from it comes
+    /// out of those `size` bytes, and revoking this Untyped takes it back.
+    UntypedSplit {
+        /// Bytes of the parent region the child takes, its control block
+        /// included.
+        size: u64,
+        /// Slot to install the child's capability into.
+        dst: CapId,
+    },
     /// Signal a Notification: OR `bits` into its signal word.
     NotificationSignal {
         /// Bits to set.
@@ -116,7 +127,7 @@ impl Method {
             | Method::CNodeDelete { .. }
             | Method::CNodeRevoke { .. } => ObjectKind::CNode,
             Method::FrameIdentify => ObjectKind::Frame,
-            Method::UntypedRetype { .. } => ObjectKind::Untyped,
+            Method::UntypedRetype { .. } | Method::UntypedSplit { .. } => ObjectKind::Untyped,
             Method::NotificationSignal { .. } => ObjectKind::Notification,
         }
     }
@@ -132,7 +143,7 @@ impl Method {
             | Method::CNodeDelete { .. }
             | Method::CNodeRevoke { .. } => Rights::WRITE,
             Method::FrameIdentify => Rights::READ,
-            Method::UntypedRetype { .. } => Rights::RETYPE,
+            Method::UntypedRetype { .. } | Method::UntypedSplit { .. } => Rights::RETYPE,
             Method::NotificationSignal { .. } => Rights::SEND,
         }
     }

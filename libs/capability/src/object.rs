@@ -171,6 +171,33 @@ impl Untyped {
         self.watermark
     }
 
+    /// Bytes at the start of a child region split from an Untyped
+    /// ([`child`](Self::child)) that hold its own control block.
+    pub const CHILD_HEADER: u64 = 64;
+
+    /// The smallest child region, and the unit its size comes in: a page.
+    pub const CHILD_UNIT: u64 = 4096;
+
+    /// The control block of a child Untyped split from its parent over the
+    /// carved storage `[base, base + size)`: the block itself sits in the
+    /// first [`CHILD_HEADER`](Self::CHILD_HEADER) bytes, and the child's
+    /// region is the rest, so one carve holds both. `None` unless `size` is a
+    /// whole number of pages ([`CHILD_UNIT`](Self::CHILD_UNIT)) and `base` is
+    /// page-aligned.
+    #[must_use]
+    pub const fn child(base: u64, size: u64) -> Option<Self> {
+        if size == 0
+            || !size.is_multiple_of(Self::CHILD_UNIT)
+            || !base.is_multiple_of(Self::CHILD_UNIT)
+        {
+            return None;
+        }
+        Some(Self::new(
+            base + Self::CHILD_HEADER,
+            size - Self::CHILD_HEADER,
+        ))
+    }
+
     /// Make the whole region free again: the watermark back to the base.
     /// Only once nothing retyped from it is alive: its capability was
     /// revoked and is the region's only one (ADR 0020).
@@ -219,6 +246,24 @@ mod tests {
         let b = u.allocate(8, 64, 1).unwrap();
         assert_eq!(b % 64, 0);
         assert!(b >= 0x1_0000 + 200);
+    }
+
+    #[test]
+    fn a_child_keeps_its_control_block_out_of_its_region() {
+        let c = Untyped::child(0x4_0000, 0x2000).unwrap();
+        assert_eq!(c.base(), 0x4_0000 + Untyped::CHILD_HEADER);
+        assert_eq!(c.size(), 0x2000 - Untyped::CHILD_HEADER);
+        assert!(core::mem::size_of::<Untyped>() as u64 <= Untyped::CHILD_HEADER);
+        // A page-aligned object skips the header's page; the region holds one.
+        let mut c2 = c;
+        assert_eq!(c2.allocate(0x1000, 0x1000, 1), Some(0x4_1000));
+        assert_eq!(c2.allocate(0x1000, 0x1000, 1), None);
+        // Reset never hands out the header.
+        c2.reset();
+        assert_eq!(c2.watermark(), 0x4_0000 + Untyped::CHILD_HEADER);
+        for (base, size) in [(0x4_0000, 0), (0x4_0000, 0x1800), (0x4_0800, 0x1000)] {
+            assert_eq!(Untyped::child(base, size), None);
+        }
     }
 
     #[test]
