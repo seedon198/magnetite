@@ -93,10 +93,10 @@ Synchronous IPC (blocking `Endpoint` send/receive/call) and the ring-3
 
 ## M5: User servers
 
-**Status: in progress** (epic #20). Revoke is done: every capability records its place in the derivation tree, `CNodeRevoke` takes back what was derived, the last capability destroys its object, and a task is reaped through revoke. #162 is under way: Notification wait and Untyped splitting are done, and [ADR 0023](adr/0023-user-threads-and-address-spaces.md) plans user-created threads and address spaces in five steps; steps 1 to 4 (CNodes, address spaces and running threads, all from Untyped) are done.
+**Status: in progress** (epic #20). Revoke is done: every capability records its place in the derivation tree, `CNodeRevoke` takes back what was derived, the last capability destroys its object, and a task is reaped through revoke. #162 is done: tasks wait on Notifications, split Untyped memory, and build CNodes, address spaces and threads, so the root task can build and revoke a whole task. Next is the server runtime library.
 
 - [x] Capability revoke: the derivation tree of [ADR 0020](adr/0020-capability-derivation-and-revoke.md) (#156), before any `GRANT` path between tasks
-- [ ] Notification wait ([ADR 0022](adr/0022-notification-wait.md), done), Untyped splitting (done), user-created `Thread` and `AddressSpace` objects (#162)
+- [x] Notification wait ([ADR 0022](adr/0022-notification-wait.md)), Untyped splitting, user-created `Thread` and `AddressSpace` objects ([ADR 0023](adr/0023-user-threads-and-address-spaces.md)) (#162)
 - [ ] Server runtime library (`libs/`): receive-loop, capability plumbing
 - [ ] Device manager server; bus enumeration (PCI/PCIe via ECAM)
 - [ ] Driver-as-server model proven end to end (e.g. serial or a timer server)

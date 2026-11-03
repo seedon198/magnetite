@@ -43,7 +43,7 @@ const ROOT_STACK_SLOT: usize = 7;
 
 /// Slots in the root task's CNode, and its Untyped memory in frames (64 KiB).
 const ROOT_SLOTS: usize = 64;
-const ROOT_UNTYPED_FRAMES: usize = 32;
+const ROOT_UNTYPED_FRAMES: usize = 64;
 
 /// Each task's entry point, for its first switch into ring 3.
 static ENTRY: [AtomicU64; thread::MAX] = [const { AtomicU64::new(0) }; thread::MAX];
@@ -487,11 +487,13 @@ fn root_demo(console: SlotRef, root: &[u8]) {
         2,
         "task: root's address spaces have no ASIDs"
     );
-    // Root's threads all went: one destroyed while it waited, one by its own
-    // hand, its stack released once another thread ran.
+    // Root's threads all went (one destroyed while it waited, one by its own
+    // hand, its stack released once another thread ran, and the child
+    // task's by revoke); the one left is the Thread root retyped afterwards
+    // to show the revoked memory is reusable.
     assert_eq!(
         thread::object_threads(),
-        0,
+        1,
         "task: a destroyed Thread is still bound"
     );
 

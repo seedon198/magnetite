@@ -46,6 +46,17 @@ pub fn read_u64(addr: u64) -> u64 {
     unsafe { core::ptr::read_volatile(addr as *const u64) }
 }
 
+/// Write `bytes` at `addr`, which may fault.
+pub fn write_bytes(addr: u64, bytes: &[u8]) {
+    for (i, b) in bytes.iter().enumerate() {
+        // SAFETY: a write through an address the program names, in its own
+        // address space: a bad one raises a page fault that ends the task,
+        // and a good one can only change the task's own memory, which is
+        // the caller's to change. It is volatile so it is never elided.
+        unsafe { core::ptr::write_volatile((addr + i as u64) as *mut u8, *b) }
+    }
+}
+
 // The entry point the linker script names. The kernel starts a task here with
 // `rsp` at the top of its stack; align it, clear the frame pointer and call
 // the program's `entry!` function, which never returns.

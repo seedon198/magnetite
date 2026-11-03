@@ -94,6 +94,13 @@ All notable changes are documented here. The format follows
   stays stopped while suspended, is destroyed while waiting, and deletes its
   own Thread.
 
+- **A task builds a task** (#162, ADR 0023 step 5): the root task splits
+  48 KiB off its Untyped and builds a separate child from it (CNode, address
+  space, tables, a code frame it writes and maps read and execute, a stack
+  and a Thread), starts it, and revokes the Untyped: the child stops and the
+  memory can be retyped again. The root task's Untyped is now 256 KiB;
+  `sys::debug::write_bytes` writes into a frame a program mapped.
+
 ### Changed
 
 - A reaped task's memory is no longer kept while another task holds a
