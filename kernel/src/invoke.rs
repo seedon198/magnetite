@@ -74,7 +74,7 @@ pub fn invoke(
         }
         Method::FrameIdentify => Ok(InvokeOk::Phys(cap.object.phys)),
         Method::NotificationSignal { bits } => {
-            hal::object::notification_signal(cap.object.phys, bits, hhdm);
+            hal::object::notification_signal(cap.object, bits, hhdm);
             Ok(InvokeOk::Done)
         }
         Method::UntypedRetype { kind, count, dst } => {
@@ -86,10 +86,10 @@ pub fn invoke(
                 return Err(InvokeError::Cap(CapError::Occupied));
             }
             // The Untyped capability points at its control block (an `Untyped`).
-            let mut ut = hal::object::load_untyped(cap.object.phys, hhdm);
+            let mut ut = hal::object::load_untyped(cap.object, hhdm);
             let base = hal::object::retype(&mut ut, size, align, count, hhdm)
                 .ok_or(InvokeError::OutOfMemory)?;
-            hal::object::store_untyped(cap.object.phys, hhdm, ut);
+            hal::object::store_untyped(cap.object, hhdm, ut);
             let obj = ObjectRef::new(kind, base);
             mdb::insert_child(reg, at, dst, Capability::new(obj, Rights::ALL))
                 .map_err(|e| InvokeError::Cap(e.into()))?;

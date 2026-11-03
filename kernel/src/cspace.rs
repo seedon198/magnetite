@@ -18,6 +18,7 @@ use capability::mdb::{self, Deleted, Entry, REVOKE_BUDGET};
 use capability::{
     CapError, CapId, CapSpace, Capability, ObjectKind, ObjectRef, SlotRef, SlotStore,
 };
+use hal::object::CNodeSpace;
 use hal::sync::SpinLock;
 use sched::ThreadId;
 
@@ -27,7 +28,7 @@ pub const MAX_CNODES: usize = 32;
 /// A registered CNode: the object, and the capability space over its slots.
 struct Node {
     object: ObjectRef,
-    space: CapSpace<'static, ObjectRef>,
+    space: CNodeSpace,
 }
 
 /// Every live CNode, and the CNode each thread's capability space is.
@@ -36,8 +37,8 @@ pub struct Registry {
     of: [Option<u16>; ::ipc::MAX_THREADS],
 }
 
-/// The registry. Never register a CNode twice:
-/// `hal::object::cnode_cap_space` clears the CNode it wraps.
+/// The registry. A CNode's space can be formed only once while it lives
+/// (`hal::object::CNodeSpace`), so it is registered at most once.
 pub static CSPACES: SpinLock<Registry> = SpinLock::new(Registry {
     cnodes: [const { None }; MAX_CNODES],
     of: [None; ::ipc::MAX_THREADS],
@@ -46,11 +47,7 @@ pub static CSPACES: SpinLock<Registry> = SpinLock::new(Registry {
 impl Registry {
     /// Register CNode `object`, with the capability space formed over it, and
     /// return its registry index; `None` if the registry is full.
-    pub fn register(
-        &mut self,
-        object: ObjectRef,
-        space: CapSpace<'static, ObjectRef>,
-    ) -> Option<u16> {
+    pub fn register(&mut self, object: ObjectRef, space: CNodeSpace) -> Option<u16> {
         assert!(
             space.capacity() <= usize::from(u16::MAX) + 1,
             "cspace: a CNode too large to name its slots"
@@ -207,7 +204,7 @@ pub fn with<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 ///
 /// # Panics
 /// If the registry is full.
-pub fn install(t: ThreadId, cnode: ObjectRef, space: CapSpace<'static, ObjectRef>) -> u16 {
+pub fn install(t: ThreadId, cnode: ObjectRef, space: CNodeSpace) -> u16 {
     with(|r| {
         let c = r
             .register(cnode, space)
@@ -281,9 +278,9 @@ pub fn revoke(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<bool, CapE
     let obj = r.cap(at)?.object;
     if obj.kind == ObjectKind::Untyped && mdb::is_original(r, at)? {
         let hhdm = crate::ipc::hhdm();
-        let mut ut = hal::object::load_untyped(obj.phys, hhdm);
+        let mut ut = hal::object::load_untyped(obj, hhdm);
         ut.reset();
-        hal::object::store_untyped(obj.phys, hhdm, ut);
+        hal::object::store_untyped(obj, hhdm, ut);
     }
     Ok(true)
 }

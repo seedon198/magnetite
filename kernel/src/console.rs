@@ -66,9 +66,10 @@ pub fn start(t: ThreadId) -> SlotRef {
     let ep = hal::object::retype(&mut ut, esz, eal, 1, hhdm).expect("console: endpoint retype");
     let ep = ObjectRef::new(ObjectKind::Endpoint, ep);
 
-    // `cnode` was just retyped for `slots` slots and gets exactly one CapSpace.
+    // `cnode` was just retyped for `slots` slots.
+    let cnode = ObjectRef::new(ObjectKind::CNode, cnode);
     let space = hal::object::cnode_cap_space(cnode, slots, hhdm);
-    cspace::install(t, ObjectRef::new(ObjectKind::CNode, cnode), space);
+    cspace::install(t, cnode, space);
     // Every capability to the endpoint derives from this original (ADR 0020),
     // which the server keeps; it receives through a RECV-only copy.
     let origin = cspace::insert_root(t, ORIGIN, Capability::new(ep, Rights::ALL))

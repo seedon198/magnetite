@@ -125,11 +125,11 @@ pub fn destroy(ipc: &mut Ipc, deleted: &mdb::Deleted<ObjectRef>) {
         return;
     }
     let hhdm = HHDM.load(Ordering::Relaxed);
-    let mut state = hal::object::load_endpoint(obj.phys, hhdm);
+    let mut state = hal::object::load_endpoint(obj, hhdm);
     let mut queue = EndpointQueue::load(&state);
     let outcome = ipc.destroy_endpoint(&mut queue);
     queue.store(&mut state);
-    hal::object::store_endpoint(obj.phys, hhdm, state);
+    hal::object::store_endpoint(obj, hhdm, state);
     let mut sched = SCHED.lock();
     for t in outcome.woken() {
         assert!(sched.admit(t), "ipc: a revoked waiter already runnable");
@@ -138,7 +138,7 @@ pub fn destroy(ipc: &mut Ipc, deleted: &mdb::Deleted<ObjectRef>) {
 
 /// The thread at the head of endpoint `ep`'s queue, if any.
 pub fn waiting_on(ep: ObjectRef) -> Option<ThreadId> {
-    with_caps(|_, _| EndpointQueue::load(&hal::object::load_endpoint(ep.phys, hhdm())).head)
+    with_caps(|_, _| EndpointQueue::load(&hal::object::load_endpoint(ep, hhdm())).head)
 }
 
 /// The capability spaces as the engine sees them.
@@ -184,24 +184,24 @@ fn invoke(
             let mut ipc = IPC.lock();
             let mut spaces = CSPACES.lock();
             let mut caps = Spaces(&mut spaces);
-            let (phys, rights, badge) = match ep {
+            let (obj, rights, badge) = match ep {
                 Some(slot) => {
                     let cap = caps.get(me, slot).map_err(|_| IpcError::InvalidCap)?;
                     if cap.object.kind != ObjectKind::Endpoint {
                         return Err(IpcError::InvalidCap);
                     }
-                    (Some(cap.object.phys), cap.rights, cap.badge)
+                    (Some(cap.object), cap.rights, cap.badge)
                 }
                 None => (None, Rights::NONE, 0),
             };
-            let mut state = phys.map(|p| hal::object::load_endpoint(p, hhdm));
+            let mut state = obj.map(|o| hal::object::load_endpoint(o, hhdm));
             let mut queue = state
                 .as_ref()
                 .map_or(EndpointQueue::new(), EndpointQueue::load);
             let outcome = op(&mut ipc, &mut caps, &mut queue, me, rights, badge);
-            if let (Some(p), Some(s)) = (phys, state.as_mut()) {
+            if let (Some(o), Some(s)) = (obj, state.as_mut()) {
                 queue.store(s);
-                hal::object::store_endpoint(p, hhdm, *s);
+                hal::object::store_endpoint(o, hhdm, *s);
             }
             outcome
         };
@@ -275,12 +275,16 @@ pub fn demo(boot_info: &BootInfo) {
         panic!("ipc: demo retype failed");
     };
 
-    // Each CNode was just retyped for SLOTS slots, and each gets exactly one
-    // CapSpace, kept for the life of the system.
+    // Each CNode was just retyped for SLOTS slots; its space is kept for the
+    // life of the system.
+    let (srv, cli) = (
+        ObjectRef::new(ObjectKind::CNode, srv),
+        ObjectRef::new(ObjectKind::CNode, cli),
+    );
     let server = hal::object::cnode_cap_space(srv, SLOTS, hhdm);
     let client = hal::object::cnode_cap_space(cli, SLOTS, hhdm);
-    cspace::install(SERVER, ObjectRef::new(ObjectKind::CNode, srv), server);
-    cspace::install(CLIENT, ObjectRef::new(ObjectKind::CNode, cli), client);
+    cspace::install(SERVER, srv, server);
+    cspace::install(CLIENT, cli, client);
     // Every capability to the endpoint derives from one original, kept in the
     // server's last slot (ADR 0020): the last-capability check relies on it.
     let ep = ObjectRef::new(ObjectKind::Endpoint, ep);

@@ -874,9 +874,9 @@ fn demo_capabilities(boot_info: &BootInfo) {
     ) else {
         panic!("caps: CNode retype failed");
     };
-    // `cnode_phys` is a CNode just retyped for CNODE_SLOTS slots (our exclusive
-    // HHDM-mapped storage), and we form exactly one CapSpace over it.
-    let space = hal::object::cnode_cap_space(cnode_phys, CNODE_SLOTS, hhdm);
+    // `cnode_phys` is a CNode just retyped for CNODE_SLOTS slots.
+    let cnode = ObjectRef::new(ObjectKind::CNode, cnode_phys);
+    let space = hal::object::cnode_cap_space(cnode, CNODE_SLOTS, hhdm);
 
     // Retype an Endpoint and a Notification.
     let (esz, eal) = ObjectKind::Endpoint.fixed_layout().unwrap();
@@ -895,9 +895,10 @@ fn demo_capabilities(boot_info: &BootInfo) {
         Rights::ALL,
     );
     let capacity = space.capacity();
+    assert!(hal::object::cnode_live_in(cnode_phys, cnode_phys + 1));
     let (full, weak, child_of) = ipc::with_caps(|ipc, r| {
         let c = r
-            .register(ObjectRef::new(ObjectKind::CNode, cnode_phys), space)
+            .register(cnode, space)
             .expect("caps: the CNode registry is full");
         let (ep_at, nt_at, weak_at) = (SlotRef::new(c, 0), SlotRef::new(c, 1), SlotRef::new(c, 10));
         mdb::insert_root(r, ep_at, ep).unwrap();
@@ -912,6 +913,11 @@ fn demo_capabilities(boot_info: &BootInfo) {
         r.remove(c, |d| ipc::destroy(ipc, d));
         found
     });
+    // The space is gone with the registry entry, so its storage may be freed.
+    assert!(
+        !hal::object::cnode_live_in(cnode_phys, cnode_phys + hal::paging::PAGE),
+        "caps: a removed CNode's space is still live"
+    );
 
     let ok = full.allows(Rights::SEND | Rights::RECV)
         && weak.allows(Rights::SEND)
@@ -964,23 +970,19 @@ fn demo_invoke(boot_info: &BootInfo) {
     };
 
     // The Untyped capability's control block describes the (separate) region.
-    hal::object::store_untyped(
-        uctrl_phys,
-        hhdm,
-        Untyped::new(region.addr(), hal::paging::PAGE),
-    );
+    let uctrl = ObjectRef::new(ObjectKind::Untyped, uctrl_phys);
+    hal::object::store_untyped(uctrl, hhdm, Untyped::new(region.addr(), hal::paging::PAGE));
 
-    let space = hal::object::cnode_cap_space(cnode_phys, SLOTS, hhdm);
+    let cnode = ObjectRef::new(ObjectKind::CNode, cnode_phys);
+    let space = hal::object::cnode_cap_space(cnode, SLOTS, hhdm);
     let (ut_id, nt_id) = (CapId(0), CapId(1));
     ipc::with_caps(|ipc, r| {
         let c = r
-            .register(ObjectRef::new(ObjectKind::CNode, cnode_phys), space)
+            .register(cnode, space)
             .expect("invoke: the CNode registry is full");
-        let ut = Capability::new(ObjectRef::new(ObjectKind::Untyped, uctrl_phys), Rights::ALL);
-        let nt = Capability::new(
-            ObjectRef::new(ObjectKind::Notification, notif_phys),
-            Rights::ALL,
-        );
+        let ut = Capability::new(uctrl, Rights::ALL);
+        let notif = ObjectRef::new(ObjectKind::Notification, notif_phys);
+        let nt = Capability::new(notif, Rights::ALL);
         mdb::insert_root(r, SlotRef::new(c, 0), ut).unwrap();
         mdb::insert_root(r, SlotRef::new(c, 1), nt).unwrap();
 
@@ -1045,7 +1047,7 @@ fn demo_invoke(boot_info: &BootInfo) {
             hhdm,
         );
         assert_eq!(
-            hal::object::notification_pending(notif_phys, hhdm) & 0b1010,
+            hal::object::notification_pending(notif, hhdm) & 0b1010,
             0b1010
         );
 
@@ -1064,7 +1066,7 @@ fn demo_invoke(boot_info: &BootInfo) {
         );
         // Nothing retyped from the region is left, so its watermark is back at
         // the base: the next retype gets the same frame again.
-        let ut = hal::object::load_untyped(uctrl_phys, hhdm);
+        let ut = hal::object::load_untyped(uctrl, hhdm);
         assert_eq!(
             ut.watermark(),
             region.addr(),
