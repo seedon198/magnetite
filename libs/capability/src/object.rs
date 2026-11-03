@@ -29,6 +29,80 @@ pub enum ObjectKind {
     AddressSpace,
     /// A schedulable execution context.
     Thread,
+    /// One page-table page, at any paging level below the root
+    /// ([ADR 0023](../../docs/adr/0023-user-threads-and-address-spaces.md)).
+    PageTable,
+}
+
+/// Where a Frame or PageTable capability is mapped
+/// ([ADR 0023](../../docs/adr/0023-user-threads-and-address-spaces.md)),
+/// packed into the capability's badge word, which those kinds do not
+/// otherwise use. Badge 0 is "not mapped".
+///
+/// The record names the address space by ASID and generation, so a record of
+/// a destroyed space is stale, never a reference to whatever reuses its ASID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mapping {
+    /// The address space's ASID.
+    pub asid: u8,
+    /// The ASID's generation when the mapping was made.
+    pub generation: u32,
+    /// The virtual page number mapped at (or, for a table, covered).
+    pub vpn: u64,
+    /// The paging level: 0 for a frame, 1 to 3 for a table installed as a
+    /// PDPT, page directory or page table.
+    pub level: u8,
+}
+
+impl Mapping {
+    /// ASIDs: 6 bits.
+    pub const ASIDS: usize = 64;
+    /// Generations: 19 bits, then they wrap.
+    pub const GENERATIONS: u32 = 1 << 19;
+    const MAPPED: u64 = 1 << 63;
+    const LEVEL_SHIFT: u32 = 61;
+    const ASID_SHIFT: u32 = 55;
+    const GEN_SHIFT: u32 = 36;
+    const VPN_MASK: u64 = (1 << 36) - 1;
+
+    /// Pack into a badge word. `None` if a field is out of range.
+    #[must_use]
+    pub const fn pack(self) -> Option<u64> {
+        if self.level > 3
+            || self.asid as usize >= Self::ASIDS
+            || self.generation >= Self::GENERATIONS
+            || self.vpn > Self::VPN_MASK
+        {
+            return None;
+        }
+        Some(
+            Self::MAPPED
+                | ((self.level as u64) << Self::LEVEL_SHIFT)
+                | ((self.asid as u64) << Self::ASID_SHIFT)
+                | ((self.generation as u64) << Self::GEN_SHIFT)
+                | self.vpn,
+        )
+    }
+
+    /// Unpack a badge word; `None` for an unmapped capability.
+    #[must_use]
+    pub const fn unpack(badge: u64) -> Option<Self> {
+        if badge & Self::MAPPED == 0 {
+            return None;
+        }
+        Some(Self {
+            level: ((badge >> Self::LEVEL_SHIFT) & 0b11) as u8,
+            asid: ((badge >> Self::ASID_SHIFT) & 0b11_1111) as u8,
+            generation: ((badge >> Self::GEN_SHIFT) as u32) & (Self::GENERATIONS - 1),
+            vpn: badge & Self::VPN_MASK,
+        })
+    }
+
+    /// The virtual address mapped at.
+    #[must_use]
+    pub const fn vaddr(self) -> u64 {
+        self.vpn << 12
+    }
 }
 
 /// A reference to a kernel object: its kind and the physical address of its
@@ -57,8 +131,11 @@ impl ObjectKind {
     #[must_use]
     pub const fn fixed_layout(self) -> Option<(u64, u64)> {
         match self {
-            // A Frame is one page; an AddressSpace is a PML4 (also one page).
-            ObjectKind::Frame | ObjectKind::AddressSpace => Some((4096, 4096)),
+            // A Frame is one page; an AddressSpace is a PML4, and a PageTable
+            // one table below it (also one page each).
+            ObjectKind::Frame | ObjectKind::AddressSpace | ObjectKind::PageTable => {
+                Some((4096, 4096))
+            }
             ObjectKind::Endpoint => Some((
                 size_of::<EndpointState>() as u64,
                 align_of::<EndpointState>() as u64,
@@ -322,9 +399,46 @@ mod tests {
     }
 
     #[test]
+    fn mappings_pack_and_unpack() {
+        let m = Mapping {
+            asid: 63,
+            generation: Mapping::GENERATIONS - 1,
+            vpn: (1 << 36) - 1,
+            level: 3,
+        };
+        let w = m.pack().unwrap();
+        assert_ne!(w, 0, "a mapping is never the unmapped badge");
+        assert_eq!(Mapping::unpack(w), Some(m));
+        let low = Mapping {
+            asid: 0,
+            generation: 0,
+            vpn: 0x4_0000,
+            level: 0,
+        };
+        assert_eq!(Mapping::unpack(low.pack().unwrap()), Some(low));
+        assert_eq!(low.vaddr(), 0x4000_0000);
+        assert_eq!(Mapping::unpack(0), None);
+        for bad in [
+            Mapping { asid: 64, ..low },
+            Mapping {
+                generation: Mapping::GENERATIONS,
+                ..low
+            },
+            Mapping {
+                vpn: 1 << 36,
+                ..low
+            },
+            Mapping { level: 4, ..low },
+        ] {
+            assert_eq!(bad.pack(), None);
+        }
+    }
+
+    #[test]
     fn fixed_layouts_are_sane() {
         assert_eq!(ObjectKind::Frame.fixed_layout(), Some((4096, 4096)));
         assert_eq!(ObjectKind::AddressSpace.fixed_layout(), Some((4096, 4096)));
+        assert_eq!(ObjectKind::PageTable.fixed_layout(), Some((4096, 4096)));
         let (esz, eal) = ObjectKind::Endpoint.fixed_layout().unwrap();
         assert!(esz > 0 && eal.is_power_of_two());
         assert!(ObjectKind::Notification.fixed_layout().is_some());

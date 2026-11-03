@@ -360,6 +360,8 @@ fn fault_demo(fault: &[u8]) {
     crate::info!("task: fault task contained and reclaimed");
 }
 
+/// Where the root task maps a frame in the address space it builds.
+const ROOT_MAPPED: u64 = 0x4000_1000;
 /// The slot the root task retypes an Endpoint into.
 const ENDPOINT: CapId = CapId(7);
 /// The holder: a kernel thread standing in for a server the root task
@@ -440,6 +442,35 @@ fn root_demo(console: SlotRef, root: &[u8]) {
         Some(true),
         "task: slot 4 does not hold the Notification root signalled"
     );
+    // The address space root built (ADR 0023): the frame copy in slot 16 is
+    // mapped read-and-execute, the deleted frame and the unmapped one are
+    // gone. Reaping root must then free its ASID.
+    let (space, copy) = cspace::with(|r| (r.lookup(ROOT, CapId(11)), r.lookup(ROOT, CapId(16))));
+    let (space, copy) = (
+        space.expect("task: root's AddressSpace").object,
+        copy.expect("task: root's frame copy").object,
+    );
+    let at = |v| hal::vspace::translate(space, v, hhdm);
+    let mapped = at(ROOT_MAPPED).expect("task: root's frame copy is mapped");
+    assert_eq!(mapped.0, copy.phys, "task: the wrong frame is mapped");
+    assert!(
+        !mapped.1.contains(Flags::WRITABLE) && !mapped.1.contains(Flags::NO_EXECUTE),
+        "task: the mapping is not read and execute"
+    );
+    assert!(
+        at(ROOT_MAPPED - PAGE).is_none(),
+        "task: a deleted frame capability stayed mapped"
+    );
+    assert!(
+        at(ROOT_MAPPED + PAGE).is_none(),
+        "task: an unmapped frame stayed mapped"
+    );
+    assert_eq!(
+        crate::vspace::live(),
+        1,
+        "task: root's address space has no ASID"
+    );
+
     // The #105 scenario: the root task made an Endpoint (slot 7), and it
     // and its Notification are granted to a server, each a child of the
     // root's capability as an IPC transfer makes it. The server then waits
@@ -468,6 +499,11 @@ fn root_demo(console: SlotRef, root: &[u8]) {
             kept.holder
         );
     }
+    assert_eq!(
+        crate::vspace::live(),
+        0,
+        "task: the reap left an ASID in use"
+    );
     thread::wait_exit(HOLDER, "the holder");
     thread::reap(HOLDER);
     assert!(

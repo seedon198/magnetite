@@ -24,7 +24,8 @@ pub use abi::{MessageInfo, SysError, MSG_REGISTERS, NO_SLOT};
 pub use invoke::{InvokeError, InvokeOk, Method};
 pub use mdb::{SlotRef, SlotStore};
 pub use object::{
-    cnode_bytes, slot_align, EndpointState, NotificationState, ObjectKind, ObjectRef, Untyped,
+    cnode_bytes, slot_align, EndpointState, Mapping, NotificationState, ObjectKind, ObjectRef,
+    Untyped,
 };
 pub use space::{CapError, CapId, CapSpace, Slot};
 

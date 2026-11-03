@@ -16,7 +16,7 @@
 use ::ipc::Ipc;
 use capability::mdb::{self, Deleted, Entry, REVOKE_BUDGET};
 use capability::{
-    CapError, CapId, CapSpace, Capability, ObjectKind, ObjectRef, SlotRef, SlotStore,
+    CapError, CapId, CapSpace, Capability, ObjectKind, ObjectRef, Rights, SlotRef, SlotStore,
 };
 use hal::object::CNodeSpace;
 use hal::sync::SpinLock;
@@ -267,9 +267,16 @@ impl Dying {
         }
     }
 
-    /// Destroy what `d` was the last capability to: queue a CNode to be
-    /// emptied, and hand anything else to `ipc::destroy`.
+    /// Settle a deleted capability: undo the mapping a Frame or PageTable
+    /// capability records, then destroy what it was the last capability to.
+    /// A CNode is queued to be emptied; an AddressSpace frees its ASID;
+    /// anything else goes to `ipc::destroy`.
     fn settle(&mut self, ipc: &mut Ipc, r: &Registry, d: &Deleted<ObjectRef>) {
+        crate::vspace::unmap(&d.cap, crate::ipc::hhdm());
+        if d.last && d.cap.object.kind == ObjectKind::AddressSpace {
+            crate::vspace::free(d.cap.object);
+            return;
+        }
         if !d.last || d.cap.object.kind != ObjectKind::CNode {
             crate::ipc::destroy(ipc, d);
             return;
@@ -320,6 +327,47 @@ fn destroy(ipc: &mut Ipc, r: &mut Registry, d: &Deleted<ObjectRef>) {
     let mut dying = Dying::new();
     dying.settle(ipc, r, d);
     dying.drain(ipc, r);
+}
+
+/// Copy the capability at `src` into the empty `dst` as its child, with
+/// `rights` (a subset). A PageTable capability cannot be copied, so each
+/// table is installed in at most one place, and a copy of a Frame capability
+/// starts unmapped (ADR 0023).
+///
+/// # Errors
+/// As for `mdb::copy`, and [`CapError::NotPermitted`] for a PageTable.
+pub fn copy(r: &mut Registry, src: SlotRef, dst: SlotRef, rights: Rights) -> Result<(), CapError> {
+    let kind = r.cap(src)?.object.kind;
+    if kind == ObjectKind::PageTable {
+        return Err(CapError::NotPermitted);
+    }
+    mdb::copy(r, src, dst, rights)?;
+    if kind == ObjectKind::Frame {
+        let mut e = r.get(dst).expect("cspace: the copy just made");
+        e.cap.badge = 0;
+        r.set(dst, Some(e));
+    }
+    Ok(())
+}
+
+/// Mint the capability at `src` into the empty `dst`: a copy with `rights`
+/// and `badge`. Frame and PageTable capabilities keep their mapping record
+/// in the badge word, so they cannot be minted (ADR 0023).
+///
+/// # Errors
+/// As for `mdb::mint`, and [`CapError::NotPermitted`] for those kinds.
+pub fn mint(
+    r: &mut Registry,
+    src: SlotRef,
+    dst: SlotRef,
+    rights: Rights,
+    badge: u64,
+) -> Result<(), CapError> {
+    let kind = r.cap(src)?.object.kind;
+    if matches!(kind, ObjectKind::Frame | ObjectKind::PageTable) {
+        return Err(CapError::NotPermitted);
+    }
+    mdb::mint(r, src, dst, rights, badge)
 }
 
 /// Delete the capability at `at`, destroying its object if it was the last

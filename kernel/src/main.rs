@@ -23,6 +23,7 @@ mod syscall;
 mod task;
 mod thread;
 mod user;
+mod vspace;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

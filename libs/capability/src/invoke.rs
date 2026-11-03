@@ -98,6 +98,28 @@ pub enum Method {
         /// Slot to install the child's capability into.
         dst: CapId,
     },
+    /// Install the PageTable in slot `table` of the acting cap space in this
+    /// address space, at the first level above `vaddr` that has no table yet
+    /// (ADR 0023).
+    AddressSpaceMapTable {
+        /// The PageTable's slot.
+        table: CapId,
+        /// A user-half address the table will cover.
+        vaddr: u64,
+    },
+    /// Map the Frame in slot `frame` of the acting cap space at `vaddr` in
+    /// this address space, with `rights` (a subset of the Frame
+    /// capability's: `READ`, plus `WRITE` or `EXECUTE` but never both).
+    AddressSpaceMapFrame {
+        /// The Frame's slot.
+        frame: CapId,
+        /// The page-aligned user-half address to map it at.
+        vaddr: u64,
+        /// The mapping's rights.
+        rights: Rights,
+    },
+    /// Undo this Frame capability's mapping, if it has one.
+    FrameUnmap,
     /// Signal a Notification: OR `bits` into its signal word.
     NotificationSignal {
         /// Bits to set.
@@ -132,6 +154,10 @@ pub enum InvokeError {
     Unsupported,
     /// A revoke used its budget with descendants left: invoke it again.
     Again,
+    /// A mapping needs a page table that is not installed.
+    MissingTable,
+    /// The capability is already mapped, or the address already is.
+    AlreadyMapped,
 }
 
 impl Method {
@@ -149,6 +175,10 @@ impl Method {
             | Method::UntypedRetypeCNode { .. }
             | Method::UntypedSplit { .. } => ObjectKind::Untyped,
             Method::NotificationSignal { .. } => ObjectKind::Notification,
+            Method::AddressSpaceMapTable { .. } | Method::AddressSpaceMapFrame { .. } => {
+                ObjectKind::AddressSpace
+            }
+            Method::FrameUnmap => ObjectKind::Frame,
         }
     }
 
@@ -167,6 +197,9 @@ impl Method {
             | Method::UntypedRetypeCNode { .. }
             | Method::UntypedSplit { .. } => Rights::RETYPE,
             Method::NotificationSignal { .. } => Rights::SEND,
+            Method::AddressSpaceMapTable { .. }
+            | Method::AddressSpaceMapFrame { .. }
+            | Method::FrameUnmap => Rights::MAP,
         }
     }
 

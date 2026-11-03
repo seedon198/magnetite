@@ -131,7 +131,8 @@ budget and cannot exhaust kernel memory.
 | `Frame` | a physical page | one page | create + identify |
 | `Endpoint` | a synchronous IPC rendezvous | its blocked-thread queue | IPC works between kernel threads (#81); user mode in #82 |
 | `Notification` | an async signal | signal word + waiters | signal and wait (`Recv`, [ADR 0022](../adr/0022-notification-wait.md)), also from ring 3 |
-| `AddressSpace` | a page-table root | a PML4 | built by the kernel's task loader (#82); a capability to create and map one is M5 (#162) |
+| `AddressSpace` | a page-table root | a PML4, and an ASID | retyped and mapped into by tasks ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)); boot tasks' spaces are built by the kernel's loader |
+| `PageTable` | one page-table page below a root | one page | retyped and installed by tasks (ADR 0023) |
 | `Thread` | a schedulable context | - | kernel-internal; a capability to create one is M5 (#162) |
 
 Each kind's storage `(size, align)` comes from `ObjectKind::fixed_layout` (or
@@ -173,9 +174,9 @@ Done in M4:
 
 Moved to M5, tracked:
 
-- User-created **`Thread`** and **`AddressSpace`** objects (#162).
-  Notification wait ([ADR 0022](../adr/0022-notification-wait.md)) and
-  Untyped splitting are done.
+- User-created **`Thread`** objects (#162). Notification wait
+  ([ADR 0022](../adr/0022-notification-wait.md)), Untyped splitting and
+  user-built address spaces are done.
 - **Revoke**: a capability derivation tree
   ([ADR 0020](../adr/0020-capability-derivation-and-revoke.md), #156), which
   must land before any `GRANT` path between tasks.

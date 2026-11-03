@@ -11,8 +11,9 @@
 //! are below the heap lock, and code holding them must not allocate. The
 //! kernel's own locks nest in this order, outermost first: `IPC`, `CSPACES`,
 //! `SCHED`, the thread table's `SPACES`, `KERNEL_SPACE`, then the frame
-//! allocator. `hal::object`'s table of live capability spaces is a leaf: it
-//! may be taken under any of them and is never held while taking another.
+//! allocator. `hal::object`'s table of live capability spaces and the
+//! kernel's ASID table are leaves: each may be taken under any of them and
+//! is never held while taking another.
 //! No lock is held across a context switch.
 
 use core::cell::UnsafeCell;

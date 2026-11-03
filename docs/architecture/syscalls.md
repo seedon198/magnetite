@@ -65,14 +65,30 @@ the result in the message registers.
 | 7 | `NotificationSignal` | Notification (`SEND`) | `mr0` bits | none |
 | 8 | `CNodeRevoke` | CNode (`WRITE`) | `mr0` slot | none |
 | 9 | `UntypedSplit` | Untyped (`RETYPE`) | `mr0` size in bytes (whole pages), `mr1` dst | none |
+| 10 | `AddressSpaceMapTable` | AddressSpace (`MAP`) | `mr0` PageTable slot, `mr1` vaddr | none |
+| 11 | `AddressSpaceMapFrame` | AddressSpace (`MAP`) | `mr0` Frame slot, `mr1` vaddr, `mr2` rights | none |
+| 12 | `FrameUnmap` | Frame (`MAP`) | none | none |
 
 - A CNode method works on the CNode the invoked capability names: a
   destination slot, and the slot a delete or revoke names, are there, while a
   source slot is in the caller's own space. Through a capability to its own
   CNode a task manages its own slots; through one to another CNode it fills
   or clears that one ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)).
-- A retype creates one Frame, Endpoint or Notification, or one CNode, whose
-  slot count (a power of two, at most 256) is `mr3`.
+- A retype creates one Frame, Endpoint, Notification, PageTable or
+  AddressSpace, or one CNode, whose slot count (a power of two, at most 256)
+  is `mr3`. An AddressSpace starts with the kernel half and an ASID (64 at
+  most).
+- **Mapping** ([ADR 0023](../adr/0023-user-threads-and-address-spaces.md)):
+  `AddressSpaceMapTable` installs a PageTable at the first missing level
+  above `vaddr` (`AlreadyMapped` when all three are there).
+  `AddressSpaceMapFrame` maps a 4 KiB frame at a page-aligned user address
+  once every level is installed (`MissingTable` otherwise). Its rights are a
+  subset of the Frame capability's, with `READ`, and never `WRITE` and
+  `EXECUTE` together (`CapNotPermitted`). A capability maps once
+  (`AlreadyMapped`); to map a frame twice, copy the capability, and the copy
+  starts unmapped. Deleting a Frame or PageTable capability undoes its
+  mapping. PageTable capabilities cannot be copied, and Frame and PageTable
+  capabilities cannot be minted.
 - `UntypedSplit` carves a child Untyped of whole pages from the region and
   installs its capability, derived from the parent's. Its first 64 bytes hold
   its control block, so a page-aligned object retyped from it starts on its
@@ -81,7 +97,7 @@ the result in the message registers.
   keeping that one. It makes at most 64 deletions per call, then fails with
   `Again` if more remain: call it again to continue (`sys::revoke` loops).
 - Kind codes: Untyped 0, CNode 1, Frame 2, Endpoint 3, Notification 4,
-  AddressSpace 5, Thread 6.
+  AddressSpace 5, Thread 6, PageTable 7.
 - **No physical address ever reaches ring 3.** A retype answers only success,
   and identifying a frame gives its kind and size.
 
@@ -109,6 +125,8 @@ the result in the message registers.
 | 9 | `PeerExited` | | 19 | `InvalidSyscall` |
 | 10 | `WrongObject` | | 20 | `Again` |
 | | | | 21 | `Revoked` |
+| | | | 22 | `MissingTable` |
+| | | | 23 | `AlreadyMapped` |
 
 `Revoked` wakes a thread blocked on an endpoint that was destroyed, because
 its last capability was deleted or revoked.
