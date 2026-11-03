@@ -140,19 +140,24 @@ impl Registry {
         self.cap(self.slot(t, id)?)
     }
 
-    /// Unregister CNode `c` and detach every thread from it. Each capability
-    /// it holds is deleted first, so what was derived from them elsewhere
-    /// moves up the tree and no link names the CNode's storage afterwards;
-    /// `deleted` sees each one, to destroy what was the last capability to
-    /// its object.
-    pub fn remove(&mut self, c: u16, mut deleted: impl FnMut(&Deleted<ObjectRef>)) {
-        let slots = self.space(c).capacity();
-        for i in 0..slots {
-            let at = SlotRef::new(c, i as u16);
-            if self.get(at).is_some() {
-                deleted(&mdb::delete(self, at).expect("cspace: an occupied slot"));
-            }
-        }
+    /// The registry index of CNode `object`, if it is registered.
+    #[must_use]
+    pub fn index_of(&self, object: ObjectRef) -> Option<u16> {
+        self.cnodes
+            .iter()
+            .position(|n| n.as_ref().is_some_and(|n| n.object == object))
+            .map(|i| i as u16)
+    }
+
+    /// Whether every registry entry is taken.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.cnodes.iter().all(Option::is_some)
+    }
+
+    /// Unregister the emptied CNode `c` and detach every thread from it.
+    fn unregister(&mut self, c: u16) {
+        debug_assert!(self.space(c).iter().next().is_none());
         self.cnodes[usize::from(c)] = None;
         for of in &mut self.of {
             if *of == Some(c) {
@@ -183,8 +188,13 @@ impl Registry {
 }
 
 impl SlotStore<ObjectRef> for Registry {
+    /// A slot of an unregistered CNode reads as empty: a destroyed CNode
+    /// leaves nothing behind, and no link ever names it.
     fn get(&self, at: SlotRef) -> Option<Entry<ObjectRef>> {
-        self.node(at.cnode).space.entry(CapId(u32::from(at.index)))
+        self.cnodes[usize::from(at.cnode)]
+            .as_ref()?
+            .space
+            .entry(CapId(u32::from(at.index)))
     }
 
     fn set(&mut self, at: SlotRef, entry: Option<Entry<ObjectRef>>) {
@@ -243,6 +253,75 @@ pub fn insert_root(
     })
 }
 
+/// CNodes whose last capability is gone, waiting to be emptied.
+struct Dying {
+    cnodes: [u16; MAX_CNODES],
+    len: usize,
+}
+
+impl Dying {
+    const fn new() -> Self {
+        Self {
+            cnodes: [0; MAX_CNODES],
+            len: 0,
+        }
+    }
+
+    /// Destroy what `d` was the last capability to: queue a CNode to be
+    /// emptied, and hand anything else to `ipc::destroy`.
+    fn settle(&mut self, ipc: &mut Ipc, r: &Registry, d: &Deleted<ObjectRef>) {
+        if !d.last || d.cap.object.kind != ObjectKind::CNode {
+            crate::ipc::destroy(ipc, d);
+            return;
+        }
+        if let Some(c) = r.index_of(d.cap.object) {
+            // Each CNode's last capability goes once, so this never fills.
+            if !self.cnodes[..self.len].contains(&c) {
+                self.cnodes[self.len] = c;
+                self.len += 1;
+            }
+        }
+    }
+
+    /// Empty and unregister every queued CNode, and any CNode that dies on
+    /// the way. A loop, not recursion: CNodes held in CNodes cannot exhaust
+    /// the kernel stack.
+    fn drain(&mut self, ipc: &mut Ipc, r: &mut Registry) {
+        while self.len > 0 {
+            self.len -= 1;
+            let c = self.cnodes[self.len];
+            self.empty(ipc, r, c);
+        }
+    }
+
+    /// Delete every capability in CNode `c`, settling each, then unregister
+    /// it. A CNode already gone is skipped: one holding the last capability
+    /// to itself is queued while it is being emptied.
+    fn empty(&mut self, ipc: &mut Ipc, r: &mut Registry, c: u16) {
+        if r.cnodes[usize::from(c)].is_none() {
+            return;
+        }
+        for i in 0..r.space(c).capacity() {
+            let at = SlotRef::new(c, i as u16);
+            if r.get(at).is_some() {
+                let d = mdb::delete(r, at).expect("cspace: an occupied slot");
+                self.settle(ipc, r, &d);
+            }
+        }
+        r.unregister(c);
+    }
+}
+
+/// Destroy what `d` was the last capability to (ADR 0020): an Endpoint's or
+/// Notification's waiters wake with `Revoked`, and a CNode is emptied, each
+/// of its capabilities deleted and destroyed in turn, and leaves the
+/// registry. Call with `IPC` and `CSPACES` held.
+fn destroy(ipc: &mut Ipc, r: &mut Registry, d: &Deleted<ObjectRef>) {
+    let mut dying = Dying::new();
+    dying.settle(ipc, r, d);
+    dying.drain(ipc, r);
+}
+
 /// Delete the capability at `at`, destroying its object if it was the last
 /// capability to it (ADR 0020). Call with `IPC` and `CSPACES` held.
 ///
@@ -250,8 +329,17 @@ pub fn insert_root(
 /// [`CapError::Empty`] if the slot is empty.
 pub fn delete(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<(), CapError> {
     let d = mdb::delete(r, at)?;
-    crate::ipc::destroy(ipc, &d);
+    destroy(ipc, r, &d);
     Ok(())
+}
+
+/// Empty CNode `c` and unregister it: delete every capability in it,
+/// destroying what each was the last capability to. Call with `IPC` and
+/// `CSPACES` held.
+pub fn clear(ipc: &mut Ipc, r: &mut Registry, c: u16) {
+    let mut dying = Dying::new();
+    dying.empty(ipc, r, c);
+    dying.drain(ipc, r);
 }
 
 /// Revoke the capability at `at`: delete its descendants, deepest and last
@@ -263,14 +351,25 @@ pub fn delete(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<(), CapErr
 /// nothing retyped from the region alive, so its watermark goes back to the
 /// base and the whole region can be retyped again.
 ///
+/// The revoked capability's own CNode may be destroyed on the way, if the
+/// last capability to it was among the descendants; the revoke is then
+/// finished, since nothing is left of the slot.
+///
 /// # Errors
 /// [`CapError::Empty`] if the slot is empty.
 pub fn revoke(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<bool, CapError> {
+    r.cap(at)?;
     for _ in 0..REVOKE_BUDGET {
+        if r.get(at).is_none() {
+            return Ok(true);
+        }
         let Some((_, d)) = mdb::revoke_step(r, at)? else {
             break;
         };
-        crate::ipc::destroy(ipc, &d);
+        destroy(ipc, r, &d);
+    }
+    if r.get(at).is_none() {
+        return Ok(true);
     }
     if mdb::has_descendants(r, at)? {
         return Ok(false);
@@ -288,7 +387,7 @@ pub fn revoke(ipc: &mut Ipc, r: &mut Registry, at: SlotRef) -> Result<bool, CapE
 /// Unregister CNode `c`, deleting every capability in it and destroying
 /// what they were the last capabilities to.
 pub fn remove(c: u16) {
-    crate::ipc::with_caps(|ipc, r| r.remove(c, |d| crate::ipc::destroy(ipc, d)));
+    crate::ipc::with_caps(|ipc, r| clear(ipc, r, c));
 }
 
 /// Unregister thread `t`'s CNode, deleting every capability in it, when the

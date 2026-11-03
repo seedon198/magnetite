@@ -70,8 +70,16 @@ Untyped's, as for any object.
 
 Destroying a CNode (its last capability deleted) deletes every capability in
 it, destroying what each was the last capability to, then leaves the
-registry. A CNode holds at most 256 slots, so this stays bounded. Threads
-using it as their capability space are stopped first (step 4).
+registry. A CNode holds at most 256 slots, so this stays bounded. Destroys
+that cascade into further CNodes run as a loop over a list, not as
+recursion. Threads using the CNode as their capability space are stopped
+first (step 4).
+
+**CNode methods address the invoked CNode.** A task must fill a child's CNode
+before the child runs, so the destination of a copy, mint or move, and the
+slot a delete or revoke names, are in the CNode the invoked capability names,
+while a source slot is in the caller's own space. With a capability to its
+own CNode a task works on its own slots, as before.
 
 ### 2. Page tables and address spaces
 

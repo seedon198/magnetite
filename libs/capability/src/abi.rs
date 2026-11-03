@@ -232,7 +232,8 @@ pub mod label {
     pub const CNODE_DELETE: u32 = 4;
     /// Frame identify: no arguments; returns `mr0` = kind code, `mr1` = size.
     pub const FRAME_IDENTIFY: u32 = 5;
-    /// Untyped retype: `mr0` = kind code, `mr1` = count (1), `mr2` = dst.
+    /// Untyped retype: `mr0` = kind code, `mr1` = count (1), `mr2` = dst;
+    /// for a CNode, `mr3` = its slot count (a power of two, at most 256).
     pub const UNTYPED_RETYPE: u32 = 6;
     /// Notification signal: `mr0` = bits.
     pub const NOTIFICATION_SIGNAL: u32 = 7;
@@ -338,6 +339,17 @@ pub fn decode_method(info: MessageInfo, mr: [u64; MSG_REGISTERS]) -> Result<Meth
             Method::CNodeRevoke { id: slot(mr[0])? }
         }
         label::FRAME_IDENTIFY => Method::FrameIdentify,
+        label::UNTYPED_RETYPE if mr[0] == kind_code(ObjectKind::CNode) => {
+            need(4)?;
+            let slots = mr[3];
+            if mr[1] != 1 || !slots.is_power_of_two() || slots > crate::invoke::MAX_CNODE_SLOTS {
+                return Err(SysError::Unsupported);
+            }
+            Method::UntypedRetypeCNode {
+                slots,
+                dst: slot(mr[2])?,
+            }
+        }
         label::UNTYPED_RETYPE => {
             need(3)?;
             let kind = kind_from_code(mr[0]).ok_or(SysError::InvalidSyscall)?;
@@ -555,11 +567,34 @@ mod tests {
     }
 
     #[test]
-    fn retype_refuses_variable_kinds_and_counts() {
+    fn retype_decodes_a_cnode_with_its_slot_count() {
         let cnode = kind_code(ObjectKind::CNode);
+        assert_eq!(
+            msg(label::UNTYPED_RETYPE, 4, [cnode, 1, 4, 16]),
+            Ok(Method::UntypedRetypeCNode {
+                slots: 16,
+                dst: CapId(4)
+            })
+        );
+        for (count, slots) in [(1, 0), (1, 12), (1, 512), (2, 16)] {
+            assert_eq!(
+                msg(label::UNTYPED_RETYPE, 4, [cnode, count, 4, slots]),
+                Err(SysError::Unsupported)
+            );
+        }
+        assert_eq!(
+            msg(label::UNTYPED_RETYPE, 3, [cnode, 1, 4, 16]),
+            Err(SysError::InvalidSyscall),
+            "a CNode needs its slot count"
+        );
+    }
+
+    #[test]
+    fn retype_refuses_variable_kinds_and_counts() {
+        let untyped = kind_code(ObjectKind::Untyped);
         let note = kind_code(ObjectKind::Notification);
         assert_eq!(
-            msg(label::UNTYPED_RETYPE, 3, [cnode, 1, 4, 0]),
+            msg(label::UNTYPED_RETYPE, 3, [untyped, 1, 4, 0]),
             Err(SysError::Unsupported)
         );
         assert_eq!(
