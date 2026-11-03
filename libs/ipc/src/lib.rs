@@ -2,14 +2,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Synchronous IPC over Endpoints, as pure logic
-//! ([ADR 0018](../../docs/adr/0018-synchronous-ipc.md)).
+//! Synchronous IPC over Endpoints, and waiting on Notifications, as pure
+//! logic ([ADR 0018](../../docs/adr/0018-synchronous-ipc.md),
+//! [ADR 0022](../../docs/adr/0022-notification-wait.md)).
 
 mod engine;
 
 pub use engine::{CapAccess, Effect, Ipc, Outcome, MAX_THREADS};
 
-use capability::object::EndpointState;
+use capability::object::{EndpointState, NotificationState};
 use capability::{MessageInfo, MSG_REGISTERS};
 use sched::ThreadId;
 
@@ -147,6 +148,44 @@ impl EndpointQueue {
 impl Default for EndpointQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A Notification's pending bits and its FIFO of waiting threads, decoded
+/// from its [`NotificationState`]. The queue links live in the per-thread IPC
+/// state, as for an endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NotificationQueue {
+    /// The pending signal bits.
+    pub signal: u64,
+    /// The waiting threads; `kind` is `Receivers` while any wait.
+    pub waiters: EndpointQueue,
+}
+
+impl NotificationQueue {
+    /// Decode from a Notification's stored state.
+    #[must_use]
+    pub fn load(s: &NotificationState) -> Self {
+        let head = decode(s.waiters);
+        Self {
+            signal: s.signal,
+            waiters: EndpointQueue {
+                head,
+                tail: decode(s.waiters_tail),
+                kind: if head.is_some() {
+                    QueueKind::Receivers
+                } else {
+                    QueueKind::Empty
+                },
+            },
+        }
+    }
+
+    /// Encode into a Notification's stored state.
+    pub fn store(&self, s: &mut NotificationState) {
+        s.signal = self.signal;
+        s.waiters = encode(self.waiters.head);
+        s.waiters_tail = encode(self.waiters.tail);
     }
 }
 
@@ -1082,6 +1121,90 @@ mod tests {
         assert_eq!(
             ipc.take_result(T2).unwrap().unwrap().unwrap().info.label(),
             2
+        );
+    }
+
+    fn bits_of(ipc: &mut Ipc, t: ThreadId) -> u64 {
+        let r = ipc.take_result(t).unwrap().unwrap().unwrap();
+        assert_eq!(
+            (r.info.bits(), r.mr),
+            (0, [0; 4]),
+            "a wait carries no message"
+        );
+        r.badge
+    }
+
+    #[test]
+    fn wait_takes_pending_bits_at_once() {
+        let (mut ipc, mut n) = (Ipc::new(), NotificationQueue::default());
+        ipc.signal(&mut n, 0b100);
+        ipc.signal(&mut n, 0b001);
+        let o = ipc.wait(&mut n, T1, Rights::RECV);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(bits_of(&mut ipc, T1), 0b101, "signals merge");
+        assert_eq!(n.signal, 0, "a wait consumes every bit");
+    }
+
+    #[test]
+    fn wait_blocks_until_a_signal_wakes_the_longest_waiter() {
+        let (mut ipc, mut n) = (Ipc::new(), NotificationQueue::default());
+        for t in [T1, T2] {
+            assert_eq!(ipc.wait(&mut n, t, Rights::RECV).caller, Effect::Block);
+        }
+        let o = ipc.signal(&mut n, 0);
+        assert_eq!(woken(&o), [None; 4], "no bits wake no one");
+        let o = ipc.signal(&mut n, 0b10);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(woken(&o), [Some(T1), None, None, None]);
+        assert_eq!(bits_of(&mut ipc, T1), 0b10);
+        assert_eq!((n.signal, n.waiters.head), (0, Some(T2)));
+        let o = ipc.signal(&mut n, 0b1);
+        assert_eq!(woken(&o), [Some(T2), None, None, None]);
+        assert_eq!(bits_of(&mut ipc, T2), 0b1);
+        assert_eq!(n, NotificationQueue::default());
+    }
+
+    #[test]
+    fn wait_needs_recv() {
+        let (mut ipc, mut n) = (Ipc::new(), NotificationQueue::default());
+        ipc.signal(&mut n, 1);
+        let o = ipc.wait(&mut n, T1, Rights::SEND);
+        assert_eq!(o.caller, Effect::Done);
+        assert_eq!(ipc.take_result(T1), Some(Err(IpcError::MissingRight)));
+        assert_eq!(n.signal, 1, "a refused wait takes nothing");
+    }
+
+    #[test]
+    fn destroying_a_notification_wakes_its_waiters_with_revoked() {
+        let (mut ipc, mut n) = (Ipc::new(), NotificationQueue::default());
+        for t in [T1, T2] {
+            ipc.wait(&mut n, t, Rights::RECV);
+        }
+        let o = ipc.destroy_notification(&mut n);
+        assert_eq!(woken(&o), [Some(T1), Some(T2), None, None]);
+        for t in [T1, T2] {
+            assert_eq!(ipc.take_result(t), Some(Err(IpcError::Revoked)));
+        }
+        assert_eq!(n.waiters, EndpointQueue::new());
+    }
+
+    #[test]
+    fn notification_queue_roundtrips_through_state() {
+        let q = NotificationQueue {
+            signal: 0b1010,
+            waiters: EndpointQueue {
+                head: Some(ThreadId(2)),
+                tail: Some(ThreadId(7)),
+                kind: QueueKind::Receivers,
+            },
+        };
+        let mut s = NotificationState::default();
+        q.store(&mut s);
+        assert_eq!((s.signal, s.waiters, s.waiters_tail), (0b1010, 3, 8));
+        assert_eq!(NotificationQueue::load(&s), q);
+        assert_eq!(
+            NotificationQueue::load(&NotificationState::default()),
+            NotificationQueue::default()
         );
     }
 

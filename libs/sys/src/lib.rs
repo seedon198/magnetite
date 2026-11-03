@@ -155,6 +155,16 @@ pub fn invoke(slot: u64, label: u32, args: &[u64]) -> Result<[u64; MSG_REGISTERS
     call(slot, MessageInfo::new(label, n as u8, 0), mr, NO_SLOT).map(|r| r.mr)
 }
 
+/// Wait on the Notification in `n`: return its pending bits, blocking until
+/// one is signalled if none are (`Recv` on a Notification, ADR 0022).
+///
+/// # Errors
+/// The kernel's answer: `InvalidCap`, or `MissingRight` without `RECV`, or
+/// `Revoked` if the Notification is destroyed while this waits.
+pub fn wait(n: u64) -> Result<u64, SysError> {
+    recv(n, NO_SLOT).map(|r| r.badge)
+}
+
 /// Revoke the capability in slot `id` of the CNode in `cnode`: delete every
 /// capability derived from it, keeping it. The kernel stops after a bounded
 /// number of deletions with [`SysError::Again`]; this loops until it is done

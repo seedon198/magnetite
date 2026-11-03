@@ -1047,7 +1047,7 @@ fn demo_invoke(boot_info: &BootInfo) {
             hhdm,
         );
         assert_eq!(
-            hal::object::notification_pending(notif, hhdm) & 0b1010,
+            hal::object::load_notification(notif, hhdm).signal & 0b1010,
             0b1010
         );
 

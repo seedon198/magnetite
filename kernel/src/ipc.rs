@@ -14,7 +14,9 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use ::ipc::{CapAccess, Effect, EndpointQueue, Ipc, IpcError, Message, Outcome, Received};
+use ::ipc::{
+    CapAccess, Effect, EndpointQueue, Ipc, IpcError, Message, NotificationQueue, Outcome, Received,
+};
 use boot_info::BootInfo;
 use capability::{
     cnode_bytes, mdb, slot_align, CapError, CapId, Capability, MessageInfo, ObjectKind, ObjectRef,
@@ -113,32 +115,90 @@ pub fn with_caps<R>(f: impl FnOnce(&mut Ipc, &mut Registry) -> R) -> R {
 }
 
 /// A capability was deleted: if it was the last to its object, destroy the
-/// object (ADR 0020). An Endpoint wakes every thread queued on it with
-/// `Revoked`. Nothing else holds kernel state to tear down yet: a
-/// Notification has no waiters until waits exist, and CNode, Untyped, Frame
-/// and Thread memory is reclaimed by the task reap.
+/// object (ADR 0020). An Endpoint or a Notification wakes every thread queued
+/// on it with `Revoked`. Nothing else holds kernel state to tear down yet:
+/// CNode, Untyped, Frame and Thread memory is reclaimed by the task reap.
 ///
 /// Call with `IPC` and `CSPACES` held (see [`with_caps`]); takes `SCHED`.
 pub fn destroy(ipc: &mut Ipc, deleted: &mdb::Deleted<ObjectRef>) {
     let obj = deleted.cap.object;
-    if !deleted.last || obj.kind != ObjectKind::Endpoint {
+    if !deleted.last {
         return;
     }
-    let hhdm = HHDM.load(Ordering::Relaxed);
-    let mut state = hal::object::load_endpoint(obj, hhdm);
+    let outcome = match obj.kind {
+        ObjectKind::Endpoint => on_endpoint(obj, |q| ipc.destroy_endpoint(q)),
+        ObjectKind::Notification => on_notification(obj, |n| ipc.destroy_notification(n)),
+        _ => return,
+    };
+    wake(&outcome);
+}
+
+/// Signal Notification `n` with `bits`, waking its longest waiter if any bit
+/// is then pending (ADR 0022). Call with `IPC` held; takes `SCHED`.
+pub fn signal(ipc: &mut Ipc, n: ObjectRef, bits: u64) {
+    let outcome = on_notification(n, |q| ipc.signal(q, bits));
+    wake(&outcome);
+}
+
+/// Run `f` on endpoint `ep`'s queue, loaded and stored back through the HHDM.
+fn on_endpoint(ep: ObjectRef, f: impl FnOnce(&mut EndpointQueue) -> Outcome) -> Outcome {
+    let hhdm = hhdm();
+    let mut state = hal::object::load_endpoint(ep, hhdm);
     let mut queue = EndpointQueue::load(&state);
-    let outcome = ipc.destroy_endpoint(&mut queue);
+    let outcome = f(&mut queue);
     queue.store(&mut state);
-    hal::object::store_endpoint(obj, hhdm, state);
+    hal::object::store_endpoint(ep, hhdm, state);
+    outcome
+}
+
+/// Run `f` on Notification `n`'s state, loaded and stored back through the
+/// HHDM.
+fn on_notification(n: ObjectRef, f: impl FnOnce(&mut NotificationQueue) -> Outcome) -> Outcome {
+    let hhdm = hhdm();
+    let mut state = hal::object::load_notification(n, hhdm);
+    let mut queue = NotificationQueue::load(&state);
+    let outcome = f(&mut queue);
+    queue.store(&mut state);
+    hal::object::store_notification(n, hhdm, state);
+    outcome
+}
+
+/// Make the threads an operation woke ready. Takes `SCHED`.
+fn wake(outcome: &Outcome) {
     let mut sched = SCHED.lock();
     for t in outcome.woken() {
-        assert!(sched.admit(t), "ipc: a revoked waiter already runnable");
+        assert!(sched.admit(t), "ipc: a woken thread already runnable");
     }
 }
 
-/// The thread at the head of endpoint `ep`'s queue, if any.
-pub fn waiting_on(ep: ObjectRef) -> Option<ThreadId> {
-    with_caps(|_, _| EndpointQueue::load(&hal::object::load_endpoint(ep, hhdm())).head)
+/// The thread at the head of the queue of `obj`, an Endpoint or a
+/// Notification, if any.
+pub fn waiting_on(obj: ObjectRef) -> Option<ThreadId> {
+    with_caps(|_, _| match obj.kind {
+        ObjectKind::Notification => {
+            NotificationQueue::load(&hal::object::load_notification(obj, hhdm()))
+                .waiters
+                .head
+        }
+        _ => EndpointQueue::load(&hal::object::load_endpoint(obj, hhdm())).head,
+    })
+}
+
+/// Wait on the Notification capability in slot `n`: take its pending bits,
+/// blocking until a signal if there are none (ADR 0022).
+pub fn wait(n: CapId) -> Result<u64, IpcError> {
+    hal::cpu::without_interrupts(|| {
+        let me = SCHED.lock().current().expect("ipc: a running thread");
+        let outcome = with_caps(|ipc, r| {
+            let cap = r.lookup(me, n).map_err(|_| IpcError::InvalidCap)?;
+            if cap.object.kind != ObjectKind::Notification {
+                return Err(IpcError::InvalidCap);
+            }
+            Ok(on_notification(cap.object, |q| ipc.wait(q, me, cap.rights)))
+        })?;
+        finish(me, &outcome)
+    })
+    .map(|r| r.expect("ipc: a completed wait carries the bits").badge)
 }
 
 /// The capability spaces as the engine sees them.
@@ -205,34 +265,40 @@ fn invoke(
             }
             outcome
         };
-
-        let next = {
-            let mut sched = SCHED.lock();
-            for t in outcome.woken() {
-                assert!(sched.admit(t), "ipc: woken thread already runnable");
-            }
-            if outcome.caller == Effect::Block {
-                // The boot thread is the idle thread: it never blocks, so the
-                // run queue is never empty (#107, ADR 0018).
-                assert_ne!(
-                    me,
-                    ThreadId(0),
-                    "ipc: the boot (idle) thread must never block"
-                );
-                sched.remove(me);
-                let next = sched.current();
-                Some(next.expect("ipc: every thread blocked (the boot thread never blocks on IPC)"))
-            } else {
-                None
-            }
-        };
-        if let Some(next) = next {
-            thread::switch_to(me, next);
-        }
-        IPC.lock()
-            .take_result(me)
-            .expect("ipc: a running thread has its result")
+        finish(me, &outcome)
     })
+}
+
+/// Apply an operation's `outcome` for the current thread `me`: make the
+/// woken threads ready, block and switch away if told to, and return `me`'s
+/// result once it has one. Call with interrupts off and no lock held.
+fn finish(me: ThreadId, outcome: &Outcome) -> Result<Option<Received>, IpcError> {
+    let next = {
+        let mut sched = SCHED.lock();
+        for t in outcome.woken() {
+            assert!(sched.admit(t), "ipc: woken thread already runnable");
+        }
+        if outcome.caller == Effect::Block {
+            // The boot thread is the idle thread: it never blocks, so the
+            // run queue is never empty (#107, ADR 0018).
+            assert_ne!(
+                me,
+                ThreadId(0),
+                "ipc: the boot (idle) thread must never block"
+            );
+            sched.remove(me);
+            let next = sched.current();
+            Some(next.expect("ipc: every thread blocked (the boot thread never blocks on IPC)"))
+        } else {
+            None
+        }
+    };
+    if let Some(next) = next {
+        thread::switch_to(me, next);
+    }
+    IPC.lock()
+        .take_result(me)
+        .expect("ipc: a running thread has its result")
 }
 
 // ---------------------------------------------------------------- demo (#81)
@@ -244,6 +310,8 @@ const CLIENT: ThreadId = ThreadId(6);
 static IPC_DONE: AtomicU64 = AtomicU64::new(0);
 /// The server slot holding the demo endpoint's original capability.
 const ORIGIN: CapId = CapId(15);
+/// The server slot holding its Notification.
+const NOTE: CapId = CapId(7);
 /// Stack size for each demo thread (they format log lines).
 const STACK_BYTES: usize = 16 * 1024;
 
@@ -266,10 +334,12 @@ pub fn demo(boot_info: &BootInfo) {
     let (esz, eal) = ObjectKind::Endpoint.fixed_layout().unwrap();
     let (fsz, fal) = ObjectKind::Frame.fixed_layout().unwrap();
     let cnode = (cnode_bytes(SLOTS) as u64, slot_align() as u64);
-    let (Some(srv), Some(cli), Some(ep), Some(frame)) = (
+    let (nsz, nal) = ObjectKind::Notification.fixed_layout().unwrap();
+    let (Some(srv), Some(cli), Some(ep), Some(note), Some(frame)) = (
         hal::object::retype(&mut ut, cnode.0, cnode.1, 1, hhdm),
         hal::object::retype(&mut ut, cnode.0, cnode.1, 1, hhdm),
         hal::object::retype(&mut ut, esz, eal, 1, hhdm),
+        hal::object::retype(&mut ut, nsz, nal, 1, hhdm),
         hal::object::retype(&mut frames, fsz, fal, 1, hhdm),
     ) else {
         panic!("ipc: demo retype failed");
@@ -288,6 +358,9 @@ pub fn demo(boot_info: &BootInfo) {
     // Every capability to the endpoint derives from one original, kept in the
     // server's last slot (ADR 0020): the last-capability check relies on it.
     let ep = ObjectRef::new(ObjectKind::Endpoint, ep);
+    let note = ObjectRef::new(ObjectKind::Notification, note);
+    let note_at = cspace::insert_root(SERVER, NOTE, Capability::new(note, Rights::ALL))
+        .expect("ipc: the server's Notification");
     let origin = cspace::insert_root(SERVER, ORIGIN, Capability::new(ep, Rights::ALL))
         .expect("ipc: the endpoint's original");
     let frame = ObjectRef::new(ObjectKind::Frame, frame);
@@ -374,6 +447,22 @@ pub fn demo(boot_info: &BootInfo) {
         crate::yield_now();
     }
     crate::info!("ipc: revoke took back derived capabilities; a waiter on a destroyed endpoint woke with Revoked");
+
+    // The server now waits on its Notification (ADR 0022): a signal wakes it
+    // with the bits; then deleting the only capability wakes it with
+    // `Revoked`.
+    while waiting_on(note) != Some(SERVER) {
+        crate::yield_now();
+    }
+    with_caps(|ipc, _| signal(ipc, note, 0b110));
+    while waiting_on(note) != Some(SERVER) {
+        crate::yield_now();
+    }
+    with_caps(|ipc, r| cspace::delete(ipc, r, note_at)).expect("ipc: delete the Notification");
+    while IPC_DONE.load(Ordering::Acquire) < 4 {
+        crate::yield_now();
+    }
+    crate::info!("ipc: a Notification waiter woke with the signalled bits, then with Revoked");
 }
 
 extern "C" fn ipc_server() -> ! {
@@ -407,6 +496,13 @@ extern "C" fn ipc_server() -> ! {
         revoked,
         Err(IpcError::Revoked),
         "ipc: a destroyed endpoint's waiter"
+    );
+    IPC_DONE.fetch_add(1, Ordering::Release);
+    assert_eq!(wait(NOTE), Ok(0b110), "ipc: the signalled bits");
+    assert_eq!(
+        wait(NOTE),
+        Err(IpcError::Revoked),
+        "ipc: a destroyed Notification's waiter"
     );
     IPC_DONE.fetch_add(1, Ordering::Release);
     crate::exit_current()

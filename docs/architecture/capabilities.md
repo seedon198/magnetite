@@ -121,7 +121,7 @@ budget and cannot exhaust kernel memory.
 | `CNode` | a capability-space node | `Slot` array | backs the cap space |
 | `Frame` | a physical page | one page | create + identify |
 | `Endpoint` | a synchronous IPC rendezvous | its blocked-thread queue | IPC works between kernel threads (#81); user mode in #82 |
-| `Notification` | an async signal | signal word + waiters | signal works, also from ring 3; wait is M5 (#162) |
+| `Notification` | an async signal | signal word + waiters | signal and wait (`Recv`, [ADR 0022](../adr/0022-notification-wait.md)), also from ring 3 |
 | `AddressSpace` | a page-table root | a PML4 | built by the kernel's task loader (#82); a capability to create and map one is M5 (#162) |
 | `Thread` | a schedulable context | - | kernel-internal; a capability to create one is M5 (#162) |
 
@@ -164,8 +164,9 @@ Done in M4:
 
 Moved to M5, tracked:
 
-- **Notification wait**, **Untyped splitting**, and user-created **`Thread`**
-  and **`AddressSpace`** objects (#162).
+- **Untyped splitting**, and user-created **`Thread`** and **`AddressSpace`**
+  objects (#162). Notification wait is done
+  ([ADR 0022](../adr/0022-notification-wait.md)).
 - **Revoke**: a capability derivation tree
   ([ADR 0020](../adr/0020-capability-derivation-and-revoke.md), #156), which
   must land before any `GRANT` path between tasks.

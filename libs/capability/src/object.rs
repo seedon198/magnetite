@@ -87,15 +87,19 @@ pub struct EndpointState {
     _reserved: u64,
 }
 
-/// The storage state of a [`Notification`](ObjectKind::Notification).
+/// The storage state of a [`Notification`](ObjectKind::Notification), living
+/// in its retyped memory. Zeroed on creation: no pending bits and no waiters.
+/// The `ipc` crate owns the encoding of the queue words
+/// ([ADR 0022](../../docs/adr/0022-notification-wait.md)).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NotificationState {
     /// Accumulated signal word (set bits are pending signals).
     pub signal: u64,
-    /// Head of the waiter queue (0 = none). Unused until Notification wait
-    /// lands (M5, #162).
+    /// First thread waiting, encoded `id + 1` (0 = none).
     pub waiters: u64,
+    /// Last thread waiting, encoded `id + 1` (0 = none).
+    pub waiters_tail: u64,
 }
 
 /// Bytes of storage one capability slot occupies in a CNode.
