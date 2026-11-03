@@ -31,6 +31,7 @@ accepted** - ADRs record the outcome of that discussion, they don't replace it.
 | [0020](0020-capability-derivation-and-revoke.md) | Capability derivation tree and revoke | Accepted |
 | [0021](0021-fpu-sse-state.md) | FPU and SSE state: enabled for every thread, saved eagerly with fxsave | Accepted |
 | [0022](0022-notification-wait.md) | Notification wait: `Recv` on a Notification capability | Accepted |
+| [0023](0023-user-threads-and-address-spaces.md) | User-created threads and address spaces | Accepted |
 
 New ADR: copy [0000-template.md](0000-template.md), take the next number, and
 open a PR labelled `adr`.
