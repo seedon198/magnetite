@@ -568,6 +568,13 @@ fn random_operations_keep_every_invariant() {
                 }
             }
             check(&st, &m);
+            for at in st.occupied() {
+                assert_eq!(parent(&st, at), Ok(m.parent[&at]), "seed {seed}: parent");
+                // Every capability to an object descends from one original:
+                // the one whose parent names another object.
+                let original = m.parent[&at].is_none_or(|p| m.object[&p] != m.object[&at]);
+                assert_eq!(is_original(&st, at), Ok(original), "seed {seed}");
+            }
         }
     }
 }

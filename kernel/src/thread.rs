@@ -21,8 +21,9 @@ use crate::{KERNEL_SPACE, SCHED};
 /// Thread slots: boot (0), cooperative workers (1, 2), preemption spinners
 /// (3, 4), IPC demo server and client (5, 6), user demo tasks (7 to 11), the
 /// console server (12), the fault task (13), the root task (14) and the user
-/// demo's entry-path checks (15 to 17) and its SSE-state check (18, 19).
-pub const MAX: usize = 20;
+/// demo's entry-path checks (15 to 17), its SSE-state check (18, 19) and the
+/// holder the root task's capabilities are granted to (20).
+pub const MAX: usize = 21;
 
 /// Each thread's FPU and SSE state (#83), swapped at every context switch.
 static FPU: [hal::fpu::FpuArea; MAX] = [const { hal::fpu::FpuArea::new() }; MAX];

@@ -58,9 +58,9 @@ sender's capability in the derivation tree
   both capability spaces stay unchanged.
 
 Today no capability with `GRANT` leaves a task: the root task's console
-capability is `SEND` only. Capability **revoke** must exist before that
-changes (ADR 0020, #156); until then, a reaped task's memory is kept while any
-capability still names it.
+capability is `SEND` only. When one does, reaping the granting task takes
+back what it granted (ADR 0020): the reap revokes the task's originals, and
+a thread blocked on a destroyed endpoint wakes with `Revoked`.
 
 ## Waiting and scheduling
 

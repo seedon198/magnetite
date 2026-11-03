@@ -15,7 +15,8 @@
 //! - [`delete`] removes one entry and lifts its descendants to its parent;
 //! - [`revoke_step`] deletes one descendant of an entry, deepest and last
 //!   first, so a revoke cut off between steps leaves a valid tree;
-//! - [`move_entry`] moves an entry to another slot, keeping its place.
+//! - [`move_entry`] moves an entry to another slot, keeping its place;
+//! - [`parent`] and [`is_original`] read an entry's place.
 //!
 //! **The last capability.** Capabilities to one object form one contiguous run
 //! of the list, as long as every capability to it descends from one original
@@ -251,6 +252,39 @@ pub fn has_descendants<Obj: Copy, S: SlotStore<Obj> + ?Sized>(
     Ok(e.link
         .next
         .is_some_and(|n| linked(store, n).link.depth > e.link.depth))
+}
+
+/// The parent of the entry at `at`: the nearest entry before it in its list
+/// at a lower depth, or `None` for a root. Walks back over the earlier
+/// siblings' subtrees.
+pub fn parent<Obj: Copy, S: SlotStore<Obj> + ?Sized>(
+    store: &S,
+    at: SlotRef,
+) -> Result<Option<SlotRef>, MdbError> {
+    let depth = store.get(at).ok_or(MdbError::Empty)?.link.depth;
+    let mut cur = store.get(at).and_then(|e| e.link.prev);
+    while let Some(r) = cur {
+        let e = linked(store, r);
+        if e.link.depth < depth {
+            return Ok(Some(r));
+        }
+        cur = e.link.prev;
+    }
+    Ok(None)
+}
+
+/// Whether the entry at `at` is the **original** capability to its object:
+/// its parent, if any, names another object. Every capability to an object
+/// descends from its original, so an original with no descendants is the
+/// only capability to its object, and for an Untyped region nothing retyped
+/// from it remains either. This is exact for Untyped too, unlike
+/// [`Deleted::last`].
+pub fn is_original<Obj: Copy + PartialEq, S: SlotStore<Obj> + ?Sized>(
+    store: &S,
+    at: SlotRef,
+) -> Result<bool, MdbError> {
+    let obj = store.get(at).ok_or(MdbError::Empty)?.cap.object;
+    Ok(parent(store, at)?.is_none_or(|p| linked(store, p).cap.object != obj))
 }
 
 /// One step of revoking the entry at `at`: delete its last descendant, which
